@@ -29,7 +29,8 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildBans
+        GatewayIntentBits.GuildBans,
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
 
@@ -96,7 +97,38 @@ const loadData = () => {
         warnings: {},
         notes: {},
         blacklistedRoles: {},
-        openTickets: {}
+        openTickets: {},
+        prefix: '+',
+        owners: [],
+        buyers: [],
+        managers: [],
+        blacklist: [],
+        disabledCommands: [],
+        commandPerms: {},
+        hideReply: false,
+        theme: null,
+        logs: {
+            mod: null,
+            msg: null,
+            raid: null,
+            role: null,
+            voice: null,
+            boost: null,
+            captcha: null
+        },
+        autoPublish: [],
+        autoReact: {},
+        captchaConfig: {
+            enabled: false,
+            roleId: null,
+            channelId: null
+        },
+        counterConfig: {
+            enabled: false,
+            categoryId: null,
+            membersChannelId: null,
+            voiceChannelId: null
+        }
     };
 
     if (!fs.existsSync(DATA_FILE)) {
@@ -118,7 +150,21 @@ const loadData = () => {
             warnings: parsed.warnings || {},
             notes: parsed.notes || {},
             blacklistedRoles: parsed.blacklistedRoles || {},
-            openTickets: parsed.openTickets || {}
+            openTickets: parsed.openTickets || {},
+            prefix: parsed.prefix ?? defaults.prefix,
+            owners: Array.isArray(parsed.owners) ? parsed.owners : defaults.owners,
+            buyers: Array.isArray(parsed.buyers) ? parsed.buyers : defaults.buyers,
+            managers: Array.isArray(parsed.managers) ? parsed.managers : defaults.managers,
+            blacklist: Array.isArray(parsed.blacklist) ? parsed.blacklist : defaults.blacklist,
+            disabledCommands: Array.isArray(parsed.disabledCommands) ? parsed.disabledCommands : defaults.disabledCommands,
+            commandPerms: parsed.commandPerms || defaults.commandPerms,
+            hideReply: parsed.hideReply ?? defaults.hideReply,
+            theme: parsed.theme ?? defaults.theme,
+            logs: { ...defaults.logs, ...(parsed.logs || {}) },
+            autoPublish: Array.isArray(parsed.autoPublish) ? parsed.autoPublish : defaults.autoPublish,
+            autoReact: parsed.autoReact || defaults.autoReact,
+            captchaConfig: { ...defaults.captchaConfig, ...(parsed.captchaConfig || {}) },
+            counterConfig: { ...defaults.counterConfig, ...(parsed.counterConfig || {}) }
         };
     } catch (e) {
         console.error('[DATABASE] Erreur de lecture de data.json, utilisation des valeurs par défaut:', e);
@@ -140,7 +186,21 @@ const db = {
     ticketConfig: initialData.ticketConfig,
     welcomeConfig: initialData.welcomeConfig,
     autoRoleId: initialData.autoRoleId,
-    ghostJoinConfig: initialData.ghostJoinConfig
+    ghostJoinConfig: initialData.ghostJoinConfig,
+    prefix: initialData.prefix,
+    owners: initialData.owners,
+    buyers: initialData.buyers,
+    managers: initialData.managers,
+    blacklist: initialData.blacklist,
+    disabledCommands: initialData.disabledCommands,
+    commandPerms: initialData.commandPerms,
+    hideReply: initialData.hideReply,
+    theme: initialData.theme,
+    logs: initialData.logs,
+    autoPublish: initialData.autoPublish,
+    autoReact: initialData.autoReact,
+    captchaConfig: initialData.captchaConfig,
+    counterConfig: initialData.counterConfig
 };
 
 // Fonction de synchronisation immédiate sur disque
@@ -157,7 +217,21 @@ const saveData = () => {
             blacklistedRoles: db.blacklistedRoles,
             warnings: Object.fromEntries(db.warnings),
             notes: Object.fromEntries(db.notes),
-            openTickets: Object.fromEntries(db.openTickets)
+            openTickets: Object.fromEntries(db.openTickets),
+            prefix: db.prefix,
+            owners: db.owners,
+            buyers: db.buyers,
+            managers: db.managers,
+            blacklist: db.blacklist,
+            disabledCommands: db.disabledCommands,
+            commandPerms: db.commandPerms,
+            hideReply: db.hideReply,
+            theme: db.theme,
+            logs: db.logs,
+            autoPublish: db.autoPublish,
+            autoReact: db.autoReact,
+            captchaConfig: db.captchaConfig,
+            counterConfig: db.counterConfig
         };
         fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf-8');
     } catch (err) {
@@ -177,10 +251,23 @@ const formatWelcomeMessage = (template, member) => {
         .replace(/\{members\}/g, member.guild.memberCount.toString());
 };
 
-// Helper constructeur d'embed standardisé et soigné
-const makeEmbed = ({ color = COLORS.DEFAULT, title, description, fields = [], thumbnail = null, footer = 'Supreme Management · V3.0' }) => {
+// Helper constructeur d'embed standardisé et soigné (prend en compte db.theme)
+const makeEmbed = ({ color = null, title, description, fields = [], thumbnail = null, footer = 'Supreme Management · V3.0' }) => {
+    let finalColor = color;
+    if (!finalColor) {
+        if (db.theme) {
+            try {
+                finalColor = typeof db.theme === 'number' ? db.theme : parseInt(db.theme.replace('#', ''), 16);
+            } catch {
+                finalColor = COLORS.DEFAULT;
+            }
+        } else {
+            finalColor = COLORS.DEFAULT;
+        }
+    }
+
     const embed = new EmbedBuilder()
-        .setColor(color)
+        .setColor(finalColor)
         .setFooter({ text: footer })
         .setTimestamp();
 
@@ -192,9 +279,35 @@ const makeEmbed = ({ color = COLORS.DEFAULT, title, description, fields = [], th
     return embed;
 };
 
+// Vérification privilèges Buyer (Accès global)
+const isBuyer = (userId, guild) => {
+    if (!userId) return false;
+    if (guild && guild.ownerId === userId) return true;
+    if (db.buyers && db.buyers.includes(userId)) return true;
+    return false;
+};
+
+// Vérification privilèges Owner (Co-propriétaire serveur)
+const isOwner = (userId, guild) => {
+    if (!userId) return false;
+    if (isBuyer(userId, guild)) return true;
+    if (db.owners && db.owners.includes(userId)) return true;
+    return false;
+};
+
+// Vérification privilèges Manager (Gestionnaire serveur)
+const isManager = (member) => {
+    if (!member) return false;
+    if (isOwner(member.id, member.guild)) return true;
+    if (db.managers && db.managers.includes(member.id)) return true;
+    if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+    return false;
+};
+
 // Vérification privilèges staff
 const isStaff = (member) => {
     if (!member) return false;
+    if (isManager(member)) return true;
     if (member.permissions.has(PermissionsBitField.Flags.Administrator) ||
         member.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
         member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
@@ -205,6 +318,64 @@ const isStaff = (member) => {
     }
     return false;
 };
+
+// Réponse en cas de permission refusée (gère +hidereply)
+const replyPermissionDenied = async (message, reason = 'Vous n\'avez pas les permissions requises.') => {
+    if (db.hideReply) return null;
+    return message.reply({
+        embeds: [makeEmbed({
+            color: COLORS.DANGER,
+            title: '⛔ Accès refusé',
+            description: reason
+        })]
+    }).catch(() => {});
+};
+
+// Fonction de centralisation des logs vers les salons configurés (+autologs / +setlog)
+const sendLog = async (guild, type, embed) => {
+    if (!guild || !db.logs) return;
+    const channelId = db.logs[type];
+    if (!channelId) return;
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel || !channel.isTextBased()) return;
+    await channel.send({ embeds: [embed] }).catch(() => {});
+};
+
+// Mise à jour automatique des salons compteurs de membres & vocaux (+counter)
+let counterUpdateDebounce = 0;
+const updateServerCounters = async (guild) => {
+    if (!guild || !db.counterConfig || !db.counterConfig.enabled) return;
+    const now = Date.now();
+    if (now - counterUpdateDebounce < 10000) return; // Anti-spam rate limit 10s
+    counterUpdateDebounce = now;
+
+    try {
+        if (db.counterConfig.membersChannelId) {
+            const memChan = guild.channels.cache.get(db.counterConfig.membersChannelId);
+            if (memChan) {
+                const targetName = `👥・Membres : ${guild.memberCount}`;
+                if (memChan.name !== targetName) {
+                    await memChan.setName(targetName).catch(() => {});
+                }
+            }
+        }
+        if (db.counterConfig.voiceChannelId) {
+            const vChan = guild.channels.cache.get(db.counterConfig.voiceChannelId);
+            if (vChan) {
+                const voiceCount = guild.members.cache.filter(m => m.voice?.channelId).size;
+                const targetName = `🔊・En Vocal : ${voiceCount}`;
+                if (vChan.name !== targetName) {
+                    await vChan.setName(targetName).catch(() => {});
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[COUNTER] Erreur mise à jour compteurs:', e.message);
+    }
+};
+
+// Cache en mémoire pour les codes Captcha temporaires
+const captchaCodes = new Map();
 
 // ─── PANEL DE CONFIGURATION GHOST-JOIN (+set ghostjoin) ───────────────────
 const buildGhostJoinEmbed = (guild) => {
@@ -833,7 +1004,56 @@ const generateHelpData = () => {
                 { name: `\`${PREFIX}ticket setcat <nom_motif> <id_catégorie>\``, value: 'Assigne une catégorie Discord distincte pour chaque motif de ticket.', inline: false },
                 { name: `\`${PREFIX}ticket send [#salon]\``, value: 'Déploie le panel public interactif dans le salon souhaité.', inline: false },
                 { name: `\`${PREFIX}rename <nouveau nom>\``, value: 'Renomme le salon du ticket en cours (Staff ou Auteur).', inline: false },
-                { name: `\`${PREFIX}close [raison]\``, value: 'Ferme et supprime le ticket avec compte à rebours de 5s et logs.', inline: false }
+                { name: `\`${PREFIX}close [raison]\``, value: 'Ferme et supprime le ticket avec compte à rebours de 5s et logs.', inline: false },
+                { name: `\`${PREFIX}add <@membre/id>\``, value: 'Ajoute un membre au ticket actuel.', inline: false },
+                { name: `\`${PREFIX}del <@membre/id>\``, value: 'Retire un membre du ticket actuel.', inline: false }
+            ]
+        },
+        hierarchy: {
+            title: '👑 Module : Hiérarchie, Buyers & Blacklist',
+            description: 'Gestion des privilèges avancés, co-propriétaires, buyers et liste noire.',
+            fields: [
+                { name: `\`${PREFIX}owner <@membre/id>\``, value: 'Ajoute un co-propriétaire sur le serveur.', inline: false },
+                { name: `\`${PREFIX}unowner <@membre/id>\``, value: 'Retire un co-propriétaire du serveur.', inline: false },
+                { name: `\`${PREFIX}owners\``, value: 'Liste tous les propriétaires et co-propriétaires actuels.', inline: false },
+                { name: `\`${PREFIX}buyer / ${PREFIX}addbuy <@membre/id>\``, value: 'Attribue le statut Buyer (accès global suprême).', inline: false },
+                { name: `\`${PREFIX}unbuyer / ${PREFIX}delbuy <@membre/id>\``, value: 'Révoque le statut Buyer d\'un membre.', inline: false },
+                { name: `\`${PREFIX}addmanager <@membre/id>\``, value: 'Délègue les permissions de gestionnaire sur le bot.', inline: false },
+                { name: `\`${PREFIX}delmanager <@membre/id>\``, value: 'Retire un gestionnaire du bot.', inline: false },
+                { name: `\`${PREFIX}bl <@membre/id> [raison]\``, value: 'Bannit et place un membre sur la blacklist du bot.', inline: false },
+                { name: `\`${PREFIX}unbl <id>\``, value: 'Retire un membre de la blacklist globale.', inline: false }
+            ]
+        },
+        logs: {
+            title: '📁 Module : Logs & Traçabilité Complète',
+            description: 'Surveillance et archivage de toutes les actions du serveur dans des salons dédiés.',
+            fields: [
+                { name: `\`${PREFIX}autologs\``, value: 'Génère automatiquement la catégorie et l\'ensemble des 7 salons de logs privés.', inline: false },
+                { name: `\`${PREFIX}setlog <type> <#salon>\``, value: 'Configure manuellement un salon pour un type précis (mod, msg, raid, role, voice, boost, captcha).', inline: false },
+                { name: `\`${PREFIX}modlogs [#salon|off]\``, value: 'Active et route les logs des sanctions (bans, kicks, mutes).', inline: false },
+                { name: `\`${PREFIX}msglogs [#salon|off]\``, value: 'Active les logs des suppressions et modifications de messages.', inline: false },
+                { name: `\`${PREFIX}raidlogs [#salon|off]\``, value: 'Active les alertes en direct de l\'anti-raid.', inline: false },
+                { name: `\`${PREFIX}rolelogs [#salon|off]\``, value: 'Active les logs de création, suppression et attribution de rôles.', inline: false },
+                { name: `\`${PREFIX}voicelogs [#salon|off]\``, value: 'Active les logs des connexions, déconnexions et déplacements vocaux.', inline: false },
+                { name: `\`${PREFIX}boostlogs [#salon|off]\``, value: 'Active les logs des boosts de serveur.', inline: false },
+                { name: `\`${PREFIX}captchalogs [#salon|off]\``, value: 'Active les logs des vérifications captcha.', inline: false }
+            ]
+        },
+        automation: {
+            title: '⚡ Module : Automatisation & Système',
+            description: 'Auto-modération, captcha, compteurs dynamiques et configuration globale.',
+            fields: [
+                { name: `\`${PREFIX}autoperm\``, value: 'Configure automatiquement des permissions saines (sécurisation immédiate de @everyone).', inline: false },
+                { name: `\`${PREFIX}automods\``, value: 'Déploie les règles natives AutoMod Discord (anti-mention spam, anti-invitations).', inline: false },
+                { name: `\`${PREFIX}autopublish [#salon|all|off]\``, value: 'Publie automatiquement les messages postés dans les salons d\'annonces.', inline: false },
+                { name: `\`${PREFIX}autoreact <#salon> <emojis...>\``, value: 'Ajoute automatiquement des réactions sous chaque message envoyé.', inline: false },
+                { name: `\`${PREFIX}captcha setup <#salon> <@role>\``, value: 'Active un portail de vérification anti-double compte par captcha.', inline: false },
+                { name: `\`${PREFIX}counter\``, value: 'Crée des salons vocaux compteurs en direct de membres et vocaux.', inline: false },
+                { name: `\`${PREFIX}change <cmd> <role/perm>\``, value: 'Modifie la permission requise pour exécuter une commande.', inline: false },
+                { name: `\`${PREFIX}listoff\``, value: 'Liste les commandes désactivées sur le serveur.', inline: false },
+                { name: `\`${PREFIX}hidereply [on|off]\``, value: 'Rend invisibles les messages de refus de permissions.', inline: false },
+                { name: `\`${PREFIX}theme <#couleur/nom>\``, value: 'Modifie la couleur dominante de tous les embeds du bot.', inline: false },
+                { name: `\`${PREFIX}prefix / ${PREFIX}mainprefix <prefix>\``, value: 'Modifie le préfixe du bot.', inline: false }
             ]
         },
         security: {
@@ -906,6 +1126,21 @@ const generateHelpData = () => {
                     .setValue('tickets')
                     .setEmoji('🎫'),
                 new StringSelectMenuOptionBuilder()
+                    .setLabel('Hiérarchie & Blacklist')
+                    .setDescription('Owners, buyers, managers et blacklist')
+                    .setValue('hierarchy')
+                    .setEmoji('👑'),
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('Logs & Traçabilité')
+                    .setDescription('Autologs, mod, messages, vocaux, etc.')
+                    .setValue('logs')
+                    .setEmoji('📁'),
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('Automatisation & Système')
+                    .setDescription('Autoperm, automods, captcha, counter, etc.')
+                    .setValue('automation')
+                    .setEmoji('⚡'),
+                new StringSelectMenuOptionBuilder()
                     .setLabel('Salons & Anti-Raid')
                     .setDescription('Lock, hide, renew, protection automatique')
                     .setValue('security')
@@ -926,14 +1161,28 @@ client.once('ready', () => {
     console.log(`[SUPREME-GESTION] Initialisé. Connecté sous ${client.user.tag}`);
     console.log(`[DATABASE] Données persistantes synchronisées avec ${DATA_FILE}`);
     client.user.setPresence({
-        activities: [{ name: `${PREFIX}help · Supreme Gestion`, type: 3 }],
+        activities: [{ name: `${db.prefix || PREFIX}help · Supreme Gestion`, type: 3 }],
         status: 'online'
     });
+
+    // Mise à jour périodique des compteurs de membres / vocaux (+counter)
+    setInterval(() => {
+        for (const guild of client.guilds.cache.values()) {
+            updateServerCounters(guild);
+        }
+    }, 5 * 60 * 1000);
 });
 
 // ─── ÉVÉNEMENT : NOUVEAU MEMBRE (Auto-Rôle + Ghost-Join + Welcome) ────────
 client.on('guildMemberAdd', async (member) => {
-    // 0. Sécurité Anti-Bot : Expulsion automatique des bots non autorisés
+    // 0. Sécurité Blacklist Globale
+    if (db.blacklist && db.blacklist.includes(member.id)) {
+        await member.ban({ reason: '[Supreme Blacklist] Membre inscrit sur la blacklist globale du bot' }).catch(() => {});
+        console.log(`[BLACKLIST] Tentative d'entrée d'un membre blacklisté bloquée : ${member.user.tag} (${member.id})`);
+        return;
+    }
+
+    // 0.1 Sécurité Anti-Bot : Expulsion automatique des bots non autorisés
     if (member.user.bot && db.antiRaid.active && db.antiRaid.antiBot) {
         try {
             await member.kick('Anti-Raid : Bot non autorisé');
@@ -981,24 +1230,60 @@ client.on('guildMemberAdd', async (member) => {
             await member.roles.remove(forbiddenRoles, 'BLRank : Rôles interdits au join').catch(() => {});
         }
     }
+
+    // 5. Mise à jour des compteurs dynamiques (+counter)
+    updateServerCounters(member.guild);
 });
 
-// ─── ÉVÉNEMENT : INTERCEPTION EN DIRECT BLRANK (guildMemberUpdate) ──────────
-client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    const userBl = db.blacklistedRoles[newMember.id];
-    if (!userBl || userBl.length === 0) return;
+// ─── ÉVÉNEMENT : DÉPART DE MEMBRE (Mise à jour compteurs) ─────────────────
+client.on('guildMemberRemove', async (member) => {
+    updateServerCounters(member.guild);
+});
 
-    // Détection des rôles ajoutés manuellement ou par un autre bot
+// ─── ÉVÉNEMENT : INTERCEPTION EN DIRECT BLRANK & LOGS (guildMemberUpdate) ──
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    // A. Détection des rôles ajoutés ou retirés (Logs + BLRank)
     const addedRoles = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
-    for (const [roleId, role] of addedRoles) {
-        if (userBl.includes(roleId) && role.editable) {
-            try {
-                await newMember.roles.remove(role, 'BLRank : Rôle interdit pour ce membre');
-                console.log(`[BLRANK] Rôle "${role.name}" (${role.id}) révoqué d'office pour ${newMember.user.tag}`);
-            } catch (err) {
-                console.error('[BLRANK] Erreur révocation rôle blacklisté:', err.message);
+    const removedRoles = oldMember.roles.cache.filter(role => !newMember.roles.cache.has(role.id));
+
+    const userBl = db.blacklistedRoles[newMember.id];
+    if (userBl && userBl.length > 0) {
+        for (const [roleId, role] of addedRoles) {
+            if (userBl.includes(roleId) && role.editable) {
+                try {
+                    await newMember.roles.remove(role, 'BLRank : Rôle interdit pour ce membre');
+                    console.log(`[BLRANK] Rôle "${role.name}" (${role.id}) révoqué d'office pour ${newMember.user.tag}`);
+                } catch (err) {
+                    console.error('[BLRANK] Erreur révocation rôle blacklisté:', err.message);
+                }
             }
         }
+    }
+
+    // B. Logs des rôles (+rolelogs)
+    if (addedRoles.size > 0 || removedRoles.size > 0) {
+        const fields = [];
+        if (addedRoles.size > 0) {
+            fields.push({ name: '➕ Rôles ajoutés', value: addedRoles.map(r => `${r} (\`${r.id}\`)`).join(', ') });
+        }
+        if (removedRoles.size > 0) {
+            fields.push({ name: '➖ Rôles retirés', value: removedRoles.map(r => `${r} (\`${r.id}\`)`).join(', ') });
+        }
+        sendLog(newMember.guild, 'role', makeEmbed({
+            color: COLORS.CYAN,
+            title: '🎭 Rôles Membre Modifiés',
+            description: `Les rôles de ${newMember} (\`${newMember.id}\`) ont été modifiés.`,
+            fields
+        }));
+    }
+
+    // C. Logs de Boost (+boostlogs)
+    if (!oldMember.premiumSince && newMember.premiumSince) {
+        sendLog(newMember.guild, 'boost', makeEmbed({
+            color: COLORS.PURPLE,
+            title: '🚀 Nouveau Boost de Serveur !',
+            description: `${newMember} vient de booster le serveur ! Merci à lui.`
+        }));
     }
 });
 
@@ -1019,6 +1304,12 @@ client.on('messageCreate', async (message) => {
                     })]
                 });
                 setTimeout(() => warningMsg.delete().catch(() => {}), 4000);
+
+                sendLog(message.guild, 'raid', makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '🚨 Anti-Raid : Lien d\'invitation bloqué',
+                    description: `Message de ${message.author} (\`${message.author.id}\`) supprimé dans ${message.channel}.`
+                }));
                 return;
             }
         }
@@ -1034,6 +1325,12 @@ client.on('messageCreate', async (message) => {
                 })]
             });
             setTimeout(() => alertMsg.delete().catch(() => {}), 5000);
+
+            sendLog(message.guild, 'raid', makeEmbed({
+                color: COLORS.DANGER,
+                title: '🚨 Anti-Raid : Mass-Mention sanctionné',
+                description: `${message.author} (\`${message.author.id}\`) a envoyé plus de ${db.antiRaid.maxMentions} mentions dans ${message.channel}. Exclu 10m.`
+            }));
             return;
         }
 
@@ -1048,15 +1345,27 @@ client.on('messageCreate', async (message) => {
                 await message.delete().catch(() => {});
                 await message.member.timeout(5 * 60 * 1000, 'Anti-Raid : Flood / Spam').catch(() => {});
                 db.userMessageTimestamps.delete(message.author.id);
+
+                sendLog(message.guild, 'raid', makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '🚨 Anti-Raid : Spam / Flood sanctionné',
+                    description: `${message.author} (\`${message.author.id}\`) a été exclu 5 minutes pour flood rapide dans ${message.channel}.`
+                }));
                 return;
             }
         }
     }
 });
 
-// ─── MODULES DE SÉCURITÉ COMPLÉMENTAIRES (Anti-Channel, Anti-Role, Anti-MassBan)
+// ─── MODULES DE SÉCURITÉ COMPLÉMENTAIRES & LOGS SANCTIONS / ROLES / VOCAUX ───
 const recentStaffBans = new Map();
 client.on('guildBanAdd', async (ban) => {
+    sendLog(ban.guild, 'mod', makeEmbed({
+        color: COLORS.DANGER,
+        title: '🔨 Membre Banni du Serveur',
+        description: `L'utilisateur **${ban.user.tag}** (\`${ban.user.id}\`) a été banni du serveur.`
+    }));
+
     if (!ban.guild || !db.antiRaid.active || !db.antiRaid.antiBan) return;
     try {
         const audit = await ban.guild.fetchAuditLogs({ type: 22 /* MEMBER_BAN_ADD */, limit: 1 }).catch(() => null);
@@ -1072,14 +1381,33 @@ client.on('guildBanAdd', async (ban) => {
                 if (staffMember && staffMember.bannable) {
                     await staffMember.roles.set([], 'Anti-Raid : Détection Mass-Ban').catch(() => {});
                     console.warn(`[ANTI-MASSBAN] Rôles révoqués pour ${entry.executor.tag} suite à un raid de bans.`);
+                    sendLog(ban.guild, 'raid', makeEmbed({
+                        color: COLORS.DANGER,
+                        title: '🚨 Anti-Raid : Mass-Ban bloqué d\'urgence',
+                        description: `Rôles révoqués pour **${entry.executor.tag}** suite à un enchaînement anormal de bannissements.`
+                    }));
                 }
             }
         }
     } catch (e) {}
 });
 
+client.on('guildBanRemove', async (ban) => {
+    sendLog(ban.guild, 'mod', makeEmbed({
+        color: COLORS.SUCCESS,
+        title: '🔓 Membre Débanni du Serveur',
+        description: `L'utilisateur **${ban.user.tag}** (\`${ban.user.id}\`) a été débanni du serveur.`
+    }));
+});
+
 client.on('channelDelete', async (channel) => {
-    if (!channel.guild || !db.antiRaid.active || !db.antiRaid.antiChannel) return;
+    if (!channel.guild) return;
+    sendLog(channel.guild, 'raid', makeEmbed({
+        color: COLORS.WARNING,
+        title: '📁 Salon Supprimé',
+        description: `Le salon **${channel.name}** a été supprimé.`
+    }));
+    if (!db.antiRaid.active || !db.antiRaid.antiChannel) return;
     try {
         const audit = await channel.guild.fetchAuditLogs({ type: 12 /* CHANNEL_DELETE */, limit: 1 }).catch(() => null);
         const entry = audit?.entries.first();
@@ -1089,7 +1417,20 @@ client.on('channelDelete', async (channel) => {
     } catch (e) {}
 });
 
+client.on('roleCreate', async (role) => {
+    sendLog(role.guild, 'role', makeEmbed({
+        color: COLORS.SUCCESS,
+        title: '🎭 Rôle Créé',
+        description: `Le rôle **${role.name}** (\`${role.id}\`) a été créé.`
+    }));
+});
+
 client.on('roleDelete', async (role) => {
+    sendLog(role.guild, 'role', makeEmbed({
+        color: COLORS.DANGER,
+        title: '🗑️ Rôle Supprimé',
+        description: `Le rôle **${role.name}** (\`${role.id}\`) a été supprimé.`
+    }));
     if (!role.guild || !db.antiRaid.active || !db.antiRaid.antiRole) return;
     try {
         const audit = await role.guild.fetchAuditLogs({ type: 32 /* ROLE_DELETE */, limit: 1 }).catch(() => null);
@@ -1100,8 +1441,130 @@ client.on('roleDelete', async (role) => {
     } catch (e) {}
 });
 
-// ─── GESTION DES INTERACTIONS : GHOST-JOIN, WELCOME, AUTOROLE, TICKETS ────
+// Logs de suppression de messages (+msglogs)
+client.on('messageDelete', async (message) => {
+    if (!message.guild || message.author?.bot) return;
+    sendLog(message.guild, 'msg', makeEmbed({
+        color: COLORS.DANGER,
+        title: '🗑️ Message Supprimé',
+        description: `Un message de ${message.author} a été supprimé dans ${message.channel}.`,
+        fields: [
+            { name: 'Contenu', value: message.content ? message.content.slice(0, 1024) : '*(Aucun contenu texte / média)*' }
+        ]
+    }));
+});
+
+// Logs de modification de messages (+msglogs)
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+    if (!newMessage.guild || newMessage.author?.bot) return;
+    if (oldMessage.content === newMessage.content) return;
+    sendLog(newMessage.guild, 'msg', makeEmbed({
+        color: COLORS.WARNING,
+        title: '✏️ Message Modifié',
+        description: `Message de ${newMessage.author} édité dans ${newMessage.channel}.`,
+        fields: [
+            { name: 'Ancien contenu', value: oldMessage.content ? oldMessage.content.slice(0, 1024) : '*(Non mis en cache)*' },
+            { name: 'Nouveau contenu', value: newMessage.content ? newMessage.content.slice(0, 1024) : '*(Vide)*' }
+        ]
+    }));
+});
+
+// Logs vocaux (+voicelogs)
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    const guild = newState.guild || oldState.guild;
+    const member = newState.member || oldState.member;
+    if (!guild || !member || member.user.bot) return;
+
+    // Mise à jour live des compteurs si configurés
+    updateServerCounters(guild);
+
+    if (!oldState.channelId && newState.channelId) {
+        sendLog(guild, 'voice', makeEmbed({
+            color: COLORS.SUCCESS,
+            title: '🔊 Connexion Vocale',
+            description: `${member} s'est connecté au salon vocal <#${newState.channelId}>.`
+        }));
+    } else if (oldState.channelId && !newState.channelId) {
+        sendLog(guild, 'voice', makeEmbed({
+            color: COLORS.DANGER,
+            title: '🔇 Déconnexion Vocale',
+            description: `${member} a quitté le salon vocal <#${oldState.channelId}>.`
+        }));
+    } else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+        sendLog(guild, 'voice', makeEmbed({
+            color: COLORS.CYAN,
+            title: '🔄 Déplacement Vocal',
+            description: `${member} s'est déplacé de <#${oldState.channelId}> vers <#${newState.channelId}>.`
+        }));
+    }
+});
+
+// ─── GESTION DES INTERACTIONS : GHOST-JOIN, WELCOME, AUTOROLE, TICKETS, CAPTCHA ────
 client.on('interactionCreate', async (interaction) => {
+    // ═══════════════════════════════════════════════════════════════════════
+    // CAPTCHA : INTERACTION DE VÉRIFICATION (+captcha)
+    // ═══════════════════════════════════════════════════════════════════════
+    if (interaction.isButton() && interaction.customId === 'captcha_verify_btn') {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code = '';
+        for (let i = 0; i < 4; i++) {
+            code += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        captchaCodes.set(interaction.user.id, code);
+
+        const modal = new ModalBuilder()
+            .setCustomId('captcha_modal_submit')
+            .setTitle(`Sécurité Captcha : ${code}`);
+
+        const codeInput = new TextInputBuilder()
+            .setCustomId('captcha_input_code')
+            .setLabel(`Tapez le code suivant : [ ${code} ]`)
+            .setPlaceholder(code)
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setMinLength(4)
+            .setMaxLength(6);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(codeInput));
+        return interaction.showModal(modal);
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === 'captcha_modal_submit') {
+        const expected = captchaCodes.get(interaction.user.id);
+        const entered = interaction.fields.getTextInputValue('captcha_input_code').trim().toUpperCase();
+
+        if (expected && entered === expected) {
+            captchaCodes.delete(interaction.user.id);
+            if (db.captchaConfig.roleId) {
+                const role = interaction.guild.roles.cache.get(db.captchaConfig.roleId);
+                if (role && role.editable) {
+                    await interaction.member.roles.add(role).catch(() => {});
+                }
+            }
+
+            sendLog(interaction.guild, 'captcha', makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '🤖 Captcha Réussi',
+                description: `${interaction.user} (\`${interaction.user.id}\`) a complété la vérification captcha avec succès.`
+            }));
+
+            return interaction.reply({
+                content: '✅ **Vérification réussie avec succès !** Bienvenue sur le serveur, votre rôle vous a été attribué.',
+                ephemeral: true
+            });
+        } else {
+            sendLog(interaction.guild, 'captcha', makeEmbed({
+                color: COLORS.DANGER,
+                title: '🤖 Captcha Échoué',
+                description: `${interaction.user} (\`${interaction.user.id}\`) a échoué au test Captcha (Attendu: \`${expected}\`, Reçu: \`${entered}\`).`
+            }));
+
+            return interaction.reply({
+                content: '❌ **Code Captcha erroné !** Veuillez recliquer sur le bouton pour générer un nouveau code.',
+                ephemeral: true
+            });
+        }
+    }
     // ═══════════════════════════════════════════════════════════════════════
     // A. INTERACTIONS GHOST-JOIN (+set ghostjoin)
     // ═══════════════════════════════════════════════════════════════════════
@@ -1969,12 +2432,60 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// ─── ROUTAGE DES COMMANDES (+PREFIX) ──────────────────────────────────────
+// ─── ROUTAGE DES COMMANDES (+PREFIX & DYNAMIQUES) ─────────────────────────
 client.on('messageCreate', async (message) => {
-    if (message.author.bot || !message.guild || !message.content.startsWith(PREFIX)) return;
+    if (message.author.bot || !message.guild) return;
 
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-    const cmd = args.shift().toLowerCase();
+    // 0. Sécurité Blacklist Globale (ignore toute interaction)
+    if (db.blacklist && db.blacklist.includes(message.author.id)) {
+        return;
+    }
+
+    // 1. Auto-Publish (+autopublish) pour les salons d'annonces
+    if (message.channel.type === ChannelType.GuildAnnouncement) {
+        if (db.autoPublish && (db.autoPublish.includes(message.channel.id) || db.autoPublish.includes('all'))) {
+            message.crosspost().catch(() => {});
+        }
+    }
+
+    // 2. Auto-React (+autoreact)
+    if (db.autoReact && db.autoReact[message.channel.id]) {
+        const emojis = db.autoReact[message.channel.id];
+        for (const emoji of emojis) {
+            await message.react(emoji).catch(() => {});
+        }
+    }
+
+    // 3. Détection et extraction du préfixe (+mainprefix / +prefix)
+    const currentPrefix = db.prefix || PREFIX;
+    let usedPrefix = null;
+    if (message.content.startsWith(currentPrefix)) {
+        usedPrefix = currentPrefix;
+    } else if (message.content.startsWith(PREFIX)) {
+        usedPrefix = PREFIX;
+    }
+    if (!usedPrefix) return;
+
+    const args = message.content.slice(usedPrefix.length).trim().split(/ +/);
+    const cmd = args.shift()?.toLowerCase();
+    if (!cmd) return;
+
+    // 4. Vérification commandes désactivées (+listoff)
+    if (db.disabledCommands && db.disabledCommands.includes(cmd)) {
+        if (!isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, `La commande \`${cmd}\` est actuellement désactivée sur ce serveur.`);
+        }
+    }
+
+    // 5. Vérification des permissions personnalisées (+change)
+    if (db.commandPerms && db.commandPerms[cmd]) {
+        const targetPermOrRole = db.commandPerms[cmd];
+        const hasRole = message.member.roles.cache.has(targetPermOrRole);
+        const hasPerm = PermissionsBitField.Flags[targetPermOrRole] && message.member.permissions.has(PermissionsBitField.Flags[targetPermOrRole]);
+        if (!hasRole && !hasPerm && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, `Cette commande requiert le rôle ou la permission \`${targetPermOrRole}\`.`);
+        }
+    }
 
     // ─── COMMANDE : HELP ──────────────────────────────────────────────────
     if (cmd === 'help') {
@@ -2388,6 +2899,153 @@ client.on('messageCreate', async (message) => {
             saveData();
             await message.channel.delete().catch(() => {});
         }, 5000);
+        return;
+    }
+
+    // ─── COMMANDE : +add <@membre/id> (Ajoute un membre au ticket) ────────
+    if (cmd === 'add' || (cmd === 'ticket' && args[0]?.toLowerCase() === 'add')) {
+        const ticketData = db.openTickets.get(message.channel.id);
+        const isTicketChannel = ticketData || message.channel.name.toLowerCase().startsWith('ticket-');
+
+        if (!isTicketChannel) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Salon Invalide',
+                    description: 'La commande `+add` ne peut être utilisée que dans un salon de ticket ouvert.'
+                })]
+            });
+        }
+
+        if (!isStaff(message.member) && (!ticketData || ticketData.authorId !== message.author.id)) {
+            return replyPermissionDenied(message, 'Seul l\'auteur du ticket ou un membre du personnel autorisé peut ajouter un membre.');
+        }
+
+        const rawArgs = cmd === 'add' ? args : args.slice(1);
+        const targetMember = message.mentions.members.first() || (rawArgs[0] ? await message.guild.members.fetch(rawArgs[0].replace(/[<@!>]/g, '')).catch(() => null) : null);
+
+        if (!targetMember) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Syntaxe de la commande',
+                    description: `Usage : \`${PREFIX}add <@membre | ID>\`\nExemple : \`${PREFIX}add @User\``
+                })]
+            });
+        }
+
+        try {
+            await message.channel.permissionOverwrites.edit(targetMember, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true,
+                AttachFiles: true
+            });
+
+            const successEmbed = makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '➕ Membre Ajouté au Ticket',
+                description: `${targetMember} a été invité dans le ticket par ${message.author}.`
+            });
+            await message.reply({ embeds: [successEmbed] });
+
+            if (db.ticketConfig.logsChannelId) {
+                const logsChan = message.guild.channels.cache.get(db.ticketConfig.logsChannelId);
+                if (logsChan) {
+                    logsChan.send({
+                        embeds: [makeEmbed({
+                            color: COLORS.CYAN,
+                            title: '➕ Membre Ajouté au Ticket',
+                            fields: [
+                                { name: 'Salon', value: `<#${message.channel.id}>`, inline: true },
+                                { name: 'Membre ajouté', value: `${targetMember} (\`${targetMember.id}\`)`, inline: true },
+                                { name: 'Ajouté par', value: `${message.author.tag}`, inline: true }
+                            ]
+                        })]
+                    }).catch(() => {});
+                }
+            }
+        } catch (err) {
+            console.error('[TICKET] Erreur lors de l\'ajout du membre:', err);
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '❌ Erreur',
+                    description: 'Impossible d\'ajouter ce membre (vérifiez mes permissions sur le salon).'
+                })]
+            });
+        }
+        return;
+    }
+
+    // ─── COMMANDE : +del <@membre/id> (Retire un membre du ticket) ────────
+    if (cmd === 'del' || (cmd === 'ticket' && args[0]?.toLowerCase() === 'del')) {
+        const ticketData = db.openTickets.get(message.channel.id);
+        const isTicketChannel = ticketData || message.channel.name.toLowerCase().startsWith('ticket-');
+
+        if (!isTicketChannel) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Salon Invalide',
+                    description: 'La commande `+del` ne peut être utilisée que dans un salon de ticket ouvert.'
+                })]
+            });
+        }
+
+        if (!isStaff(message.member) && (!ticketData || ticketData.authorId !== message.author.id)) {
+            return replyPermissionDenied(message, 'Seul l\'auteur du ticket ou un membre du personnel autorisé peut retirer un membre.');
+        }
+
+        const rawArgs = cmd === 'del' ? args : args.slice(1);
+        const targetMember = message.mentions.members.first() || (rawArgs[0] ? await message.guild.members.fetch(rawArgs[0].replace(/[<@!>]/g, '')).catch(() => null) : null);
+
+        if (!targetMember) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Syntaxe de la commande',
+                    description: `Usage : \`${PREFIX}del <@membre | ID>\`\nExemple : \`${PREFIX}del @User\``
+                })]
+            });
+        }
+
+        try {
+            await message.channel.permissionOverwrites.delete(targetMember);
+
+            const successEmbed = makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '➖ Membre Retiré du Ticket',
+                description: `${targetMember} a été retiré du ticket par ${message.author}.`
+            });
+            await message.reply({ embeds: [successEmbed] });
+
+            if (db.ticketConfig.logsChannelId) {
+                const logsChan = message.guild.channels.cache.get(db.ticketConfig.logsChannelId);
+                if (logsChan) {
+                    logsChan.send({
+                        embeds: [makeEmbed({
+                            color: COLORS.WARNING,
+                            title: '➖ Membre Retiré du Ticket',
+                            fields: [
+                                { name: 'Salon', value: `<#${message.channel.id}>`, inline: true },
+                                { name: 'Membre retiré', value: `${targetMember} (\`${targetMember.id}\`)`, inline: true },
+                                { name: 'Retiré par', value: `${message.author.tag}`, inline: true }
+                            ]
+                        })]
+                    }).catch(() => {});
+                }
+            }
+        } catch (err) {
+            console.error('[TICKET] Erreur lors du retrait du membre:', err);
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '❌ Erreur',
+                    description: 'Impossible de retirer ce membre.'
+                })]
+            });
+        }
         return;
     }
 
@@ -3428,6 +4086,775 @@ client.on('messageCreate', async (message) => {
         return message.channel.send({
             embeds: [makeEmbed({ color: COLORS.DEFAULT, title: '📢 Communication Officielle', description: text })]
         });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODULE HIÉRARCHIE & PERMISSIONS (+owner, +unowner, +owners, +buyer, +manager)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── +owner <@membre/id> ──────────────────────────────────────────────
+    if (cmd === 'owner') {
+        if (!isBuyer(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul le propriétaire principal du serveur ou un Buyer peut nommer un co-propriétaire.');
+        }
+        const target = message.mentions.members.first() || (args[0] ? await message.guild.members.fetch(args[0].replace(/[<@!>]/g, '')).catch(() => null) : null);
+        if (!target) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}owner <@membre | ID>\`` })] });
+        }
+        if (!db.owners.includes(target.id)) {
+            db.owners.push(target.id);
+            saveData();
+        }
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '👑 Co-Propriétaire Ajouté',
+                description: `${target} (\`${target.id}\`) a été ajouté à la liste des co-propriétaires avec succès.`
+            })]
+        });
+    }
+
+    // ─── +unowner <@membre/id> ────────────────────────────────────────────
+    if (cmd === 'unowner') {
+        if (!isBuyer(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul le propriétaire principal du serveur ou un Buyer peut révoquer un co-propriétaire.');
+        }
+        const targetId = message.mentions.members.first()?.id || args[0]?.replace(/[<@!>]/g, '');
+        if (!targetId || !db.owners.includes(targetId)) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Introuvable', description: 'Ce membre ne figure pas parmi les co-propriétaires.' })] });
+        }
+        db.owners = db.owners.filter(id => id !== targetId);
+        saveData();
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '👑 Co-Propriétaire Retiré',
+                description: `<@${targetId}> (\`${targetId}\`) a été retiré des co-propriétaires.`
+            })]
+        });
+    }
+
+    // ─── +owners ──────────────────────────────────────────────────────────
+    if (cmd === 'owners') {
+        const guildOwner = `<@${message.guild.ownerId}> (\`${message.guild.ownerId}\`) - *Fondateur Serveur*`;
+        const coOwners = db.owners.length > 0
+            ? db.owners.map(id => `• <@${id}> (\`${id}\`)`).join('\n')
+            : '*Aucun co-propriétaire additionnel enregistré.*';
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.PRIMARY,
+                title: '👑 Liste des Propriétaires du Serveur',
+                fields: [
+                    { name: 'Propriétaire Suprême', value: guildOwner, inline: false },
+                    { name: `Co-Propriétaires (${db.owners.length})`, value: coOwners, inline: false }
+                ]
+            })]
+        });
+    }
+
+    // ─── +buyer / +addbuy <@membre/id> ────────────────────────────────────
+    if (cmd === 'buyer' || cmd === 'addbuy') {
+        if (!isBuyer(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul un Buyer ou le propriétaire suprême peut attribuer le rang Buyer.');
+        }
+        const target = message.mentions.members.first() || (args[0] ? await message.guild.members.fetch(args[0].replace(/[<@!>]/g, '')).catch(() => null) : null);
+        if (!target) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}buyer <@membre | ID>\`` })] });
+        }
+        if (!db.buyers.includes(target.id)) {
+            db.buyers.push(target.id);
+            saveData();
+        }
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.PURPLE,
+                title: '💎 Nouveau Statut Buyer Attribué',
+                description: `${target} (\`${target.id}\`) bénéficie désormais d'un accès global Buyer sur le bot.`
+            })]
+        });
+    }
+
+    // ─── +unbuyer / +delbuy <@membre/id> ──────────────────────────────────
+    if (cmd === 'unbuyer' || cmd === 'delbuy') {
+        if (!isBuyer(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul un Buyer ou le propriétaire suprême peut retirer le rang Buyer.');
+        }
+        const targetId = message.mentions.members.first()?.id || args[0]?.replace(/[<@!>]/g, '');
+        if (!targetId || !db.buyers.includes(targetId)) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Introuvable', description: 'Ce membre ne figure pas parmi les buyers enregistrés.' })] });
+        }
+        db.buyers = db.buyers.filter(id => id !== targetId);
+        saveData();
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '💎 Statut Buyer Révoqué',
+                description: `<@${targetId}> (\`${targetId}\`) a été retiré de la liste des buyers.`
+            })]
+        });
+    }
+
+    // ─── +addmanager <@membre/id> ─────────────────────────────────────────
+    if (cmd === 'addmanager') {
+        if (!isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul un Propriétaire ou un Buyer peut désigner un gestionnaire.');
+        }
+        const target = message.mentions.members.first() || (args[0] ? await message.guild.members.fetch(args[0].replace(/[<@!>]/g, '')).catch(() => null) : null);
+        if (!target) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}addmanager <@membre | ID>\`` })] });
+        }
+        if (!db.managers.includes(target.id)) {
+            db.managers.push(target.id);
+            saveData();
+        }
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '🛡️ Gestionnaire Ajouté',
+                description: `${target} (\`${target.id}\`) a été nommé gestionnaire du bot.`
+            })]
+        });
+    }
+
+    // ─── +delmanager <@membre/id> ─────────────────────────────────────────
+    if (cmd === 'delmanager') {
+        if (!isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul un Propriétaire ou un Buyer peut retirer un gestionnaire.');
+        }
+        const targetId = message.mentions.members.first()?.id || args[0]?.replace(/[<@!>]/g, '');
+        if (!targetId || !db.managers.includes(targetId)) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Introuvable', description: 'Ce membre n\'est pas enregistré comme gestionnaire.' })] });
+        }
+        db.managers = db.managers.filter(id => id !== targetId);
+        saveData();
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '🛡️ Gestionnaire Retiré',
+                description: `<@${targetId}> (\`${targetId}\`) n'est plus gestionnaire.`
+            })]
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODULE BLACKLIST GLOBALE (+bl, +unbl)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── +bl <@membre/id> [raison] ────────────────────────────────────────
+    if (cmd === 'bl' || cmd === 'blacklist') {
+        if (!isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire ou Administrateur requise pour utiliser la blacklist.');
+        }
+        const targetId = message.mentions.members.first()?.id || args[0]?.replace(/[<@!>]/g, '');
+        if (!targetId) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}bl <@membre | ID> [raison]\`` })] });
+        }
+        if (targetId === message.author.id || targetId === message.guild.ownerId || db.owners.includes(targetId) || db.buyers.includes(targetId)) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Action Impossible', description: 'Vous ne pouvez pas blacklister un propriétaire ou vous-même.' })] });
+        }
+
+        const reason = args.slice(1).join(' ') || 'Blacklist globale bot';
+        if (!db.blacklist.includes(targetId)) {
+            db.blacklist.push(targetId);
+            saveData();
+        }
+
+        // Bannissement immédiat du serveur s'il est présent
+        const targetMember = await message.guild.members.fetch(targetId).catch(() => null);
+        if (targetMember && targetMember.bannable) {
+            await targetMember.ban({ reason: `[Blacklist Supreme] ${reason} - Par ${message.author.tag}` }).catch(() => {});
+        } else {
+            await message.guild.bans.create(targetId, { reason: `[Blacklist Supreme] ${reason}` }).catch(() => {});
+        }
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.DANGER,
+                title: '🚫 Membre Placé sur la Blacklist',
+                description: `L'utilisateur <@${targetId}> (\`${targetId}\`) a été banni et inscrit sur la liste noire globale du bot.\n**Raison :** ${reason}`
+            })]
+        });
+    }
+
+    // ─── +unbl <id> ───────────────────────────────────────────────────────
+    if (cmd === 'unbl' || cmd === 'unblacklist') {
+        if (!isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire ou Administrateur requise pour lever une blacklist.');
+        }
+        const targetId = args[0]?.replace(/[<@!>]/g, '');
+        if (!targetId || !db.blacklist.includes(targetId)) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Introuvable', description: 'Cet utilisateur ne figure pas dans la blacklist.' })] });
+        }
+        db.blacklist = db.blacklist.filter(id => id !== targetId);
+        saveData();
+
+        await message.guild.bans.remove(targetId, 'Blacklist levée par commande +unbl').catch(() => {});
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '✅ Membre Retiré de la Blacklist',
+                description: `L'utilisateur <@${targetId}> (\`${targetId}\`) a été retiré de la liste noire et débanni du serveur.`
+            })]
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODULE CONFIGURATION & UTILITAIRES (+listoff, +mainprefix, +prefix, +change, +hidereply, +theme)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── +listoff ─────────────────────────────────────────────────────────
+    if (cmd === 'listoff') {
+        const sub = args[0]?.toLowerCase();
+        if (sub && isOwner(message.author.id, message.guild)) {
+            // Bascule / toggle d'une commande
+            if (db.disabledCommands.includes(sub)) {
+                db.disabledCommands = db.disabledCommands.filter(c => c !== sub);
+                saveData();
+                return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: '✅ Commande Réactivée', description: `La commande \`${sub}\` est désormais réactivée.` })] });
+            } else {
+                db.disabledCommands.push(sub);
+                saveData();
+                return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Commande Désactivée', description: `La commande \`${sub}\` a été désactivée.` })] });
+            }
+        }
+
+        const list = db.disabledCommands.length > 0
+            ? db.disabledCommands.map(c => `• \`${PREFIX}${c}\``).join('\n')
+            : '*Aucune commande désactivée sur ce serveur.*';
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.PRIMARY,
+                title: '🚫 Commandes Désactivées',
+                description: list,
+                footer: isOwner(message.author.id, message.guild) ? `Astuce : ${PREFIX}listoff <commande> pour basculer son statut` : 'Supreme Management'
+            })]
+        });
+    }
+
+    // ─── +mainprefix & +prefix ────────────────────────────────────────────
+    if (cmd === 'mainprefix' || cmd === 'prefix') {
+        if (!isManager(message.member) && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire ou Propriétaire requise pour modifier le préfixe.');
+        }
+        const newPrefix = args[0]?.trim();
+        if (!newPrefix) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}${cmd} <nouveau_prefix>\`\nExemple : \`${PREFIX}${cmd} !\`` })] });
+        }
+        if (newPrefix.length > 5) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Erreur', description: 'Le préfixe ne peut pas dépasser 5 caractères.' })] });
+        }
+        db.prefix = newPrefix;
+        saveData();
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '⚙️ Préfixe Mis à Jour',
+                description: `Le préfixe du bot est désormais configuré sur : \`${newPrefix}\``
+            })]
+        });
+    }
+
+    // ─── +change <cmd> <role/permission/none> ──────────────────────────────
+    if (cmd === 'change') {
+        if (!isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Seul un Propriétaire du serveur peut réassigner les permissions d\'une commande.');
+        }
+        const targetCmd = args[0]?.toLowerCase().replace(PREFIX, '');
+        const targetRoleOrPerm = args[1]?.replace(/[<@&>]/g, '');
+
+        if (!targetCmd || !targetRoleOrPerm) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Syntaxe de la commande',
+                    description: `Usage : \`${PREFIX}change <commande> <@role | ID | Permission | none>\`\nExemple : \`${PREFIX}change ban 123456789012345678\` ou \`${PREFIX}change ban clear\``
+                })]
+            });
+        }
+
+        if (targetRoleOrPerm === 'none' || targetRoleOrPerm === 'clear' || targetRoleOrPerm === 'reset') {
+            delete db.commandPerms[targetCmd];
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: '🔄 Permission Réinitialisée', description: `La commande \`${targetCmd}\` utilise désormais ses permissions natives par défaut.` })] });
+        }
+
+        db.commandPerms[targetCmd] = targetRoleOrPerm;
+        saveData();
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '🔒 Permission de Commande Modifiée',
+                description: `La commande \`${targetCmd}\` requiert désormais le rôle ou la permission : \`${targetRoleOrPerm}\``
+            })]
+        });
+    }
+
+    // ─── +hidereply [on/off] ──────────────────────────────────────────────
+    if (cmd === 'hidereply') {
+        if (!isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire requise.');
+        }
+        const state = args[0]?.toLowerCase();
+        if (state === 'on' || state === 'enable') db.hideReply = true;
+        else if (state === 'off' || state === 'disable') db.hideReply = false;
+        else db.hideReply = !db.hideReply;
+        saveData();
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: db.hideReply ? COLORS.SUCCESS : COLORS.WARNING,
+                title: '👁️ Mode HideReply',
+                description: `Les messages de refus de permissions sont désormais **${db.hideReply ? 'INVISIBLES (Muets)' : 'VISIBLES (Embeds de refus)'}**.`
+            })]
+        });
+    }
+
+    // ─── +theme <#hex / nom_couleur> ──────────────────────────────────────
+    if (cmd === 'theme') {
+        if (!isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire requise pour modifier le thème.');
+        }
+        const colorInput = args[0]?.toLowerCase();
+        if (!colorInput) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.PRIMARY,
+                    title: '🎨 Thème Graphique du Bot',
+                    description: `Thème actuel : \`${db.theme || 'Défaut (#1e1f22)'}\`\n\nUsage : \`${PREFIX}theme <#hex | nom>\`\nPresets disponibles : \`purple\`, \`blue\`, \`red\`, \`green\`, \`yellow\`, \`cyan\`, \`default\``
+                })]
+            });
+        }
+
+        const presets = {
+            purple: '#c084fc',
+            blue: '#5865f2',
+            red: '#ed4245',
+            green: '#57f287',
+            yellow: '#fee75c',
+            cyan: '#00bcd4',
+            dark: '#1e1f22',
+            default: '#1e1f22'
+        };
+
+        const targetColor = presets[colorInput] || (colorInput.startsWith('#') ? colorInput : `#${colorInput}`);
+        db.theme = targetColor;
+        saveData();
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: parseInt(targetColor.replace('#', ''), 16),
+                title: '🎨 Thème Graphique Appliqué',
+                description: `La couleur dominante des embeds du bot a été définie sur **${targetColor}**.`
+            })]
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODULE LOGS & TRAÇABILITÉ (+autologs, +setlog, +modlogs, +msglogs, etc.)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── +autologs ────────────────────────────────────────────────────────
+    if (cmd === 'autologs') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Permission Administrateur requise pour déployer l\'AutoLogs.');
+        }
+
+        const progressMsg = await message.reply('⏳ Création de la catégorie et des salons de logs sécurisés...');
+
+        try {
+            // Création de la catégorie privée
+            const category = await message.guild.channels.create({
+                name: '📁・LOGS SUPREME',
+                type: ChannelType.GuildCategory,
+                permissionOverwrites: [
+                    {
+                        id: message.guild.roles.everyone.id,
+                        deny: [PermissionsBitField.Flags.ViewChannel]
+                    },
+                    {
+                        id: client.user.id,
+                        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks]
+                    }
+                ]
+            });
+
+            const logChannelsToCreate = [
+                { key: 'mod', name: '🔨・logs-mod' },
+                { key: 'msg', name: '💬・logs-messages' },
+                { key: 'raid', name: '🚨・logs-antiraid' },
+                { key: 'role', name: '🎭・logs-roles' },
+                { key: 'voice', name: '🔊・logs-vocaux' },
+                { key: 'boost', name: '🚀・logs-boosts' },
+                { key: 'captcha', name: '🤖・logs-captcha' }
+            ];
+
+            const createdLogs = {};
+            for (const item of logChannelsToCreate) {
+                const createdChan = await message.guild.channels.create({
+                    name: item.name,
+                    type: ChannelType.GuildText,
+                    parent: category.id
+                });
+                createdLogs[item.key] = createdChan.id;
+            }
+
+            db.logs = { ...db.logs, ...createdLogs };
+            saveData();
+
+            await progressMsg.delete().catch(() => {});
+
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.SUCCESS,
+                    title: '📁 Système AutoLogs Déployé avec Succès',
+                    description: `Catégorie et salons de logs créés et protégés.\n\n` +
+                        `• **Sanctions (bans/kicks/mutes) :** <#${createdLogs.mod}>\n` +
+                        `• **Messages supprimés & édités :** <#${createdLogs.msg}>\n` +
+                        `• **Alertes Anti-Raid :** <#${createdLogs.raid}>\n` +
+                        `• **Rôles membres & créations :** <#${createdLogs.role}>\n` +
+                        `• **Activité Vocale :** <#${createdLogs.voice}>\n` +
+                        `• **Boosts Serveur :** <#${createdLogs.boost}>\n` +
+                        `• **Vérifications Captcha :** <#${createdLogs.captcha}>`
+                })]
+            });
+        } catch (err) {
+            console.error('[AUTOLOGS] Erreur création salons de logs:', err);
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '❌ Erreur', description: 'Impossible de créer les salons de logs (vérifiez mes permissions "Gérer les salons").' })] });
+        }
+    }
+
+    // ─── +setlog / +setlogs <type> <#salon> ────────────────────────────────
+    if (cmd === 'setlog' || cmd === 'setlogs') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && !isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Administrateur ou Gestionnaire requise.');
+        }
+        const type = args[0]?.toLowerCase();
+        const targetChannel = message.mentions.channels.first() || (args[1] ? message.guild.channels.cache.get(args[1].replace(/[<#>]/g, '')) : message.channel);
+
+        const validTypes = ['mod', 'msg', 'raid', 'role', 'voice', 'boost', 'captcha'];
+        if (!type || (!validTypes.includes(type) && type !== 'all')) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Syntaxe de la commande',
+                    description: `Usage : \`${PREFIX}${cmd} <type> [#salon]\`\nTypes valides : \`mod\`, \`msg\`, \`raid\`, \`role\`, \`voice\`, \`boost\`, \`captcha\`, \`all\`\nExemple : \`${PREFIX}setlog mod #logs-sanctions\``
+                })]
+            });
+        }
+
+        if (type === 'all') {
+            for (const k of validTypes) db.logs[k] = targetChannel.id;
+        } else {
+            db.logs[type] = targetChannel.id;
+        }
+        saveData();
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '📁 Configuration de Salon de Log Enregistrée',
+                description: `Le type de log **${type}** a été assigné au salon ${targetChannel}.`
+            })]
+        });
+    }
+
+    // Helper de bascule rapide pour les commandes de logs individuelles
+    const handleIndividualLogToggle = async (logKey, logName) => {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && !isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission requise.');
+        }
+        const firstArg = args[0]?.toLowerCase();
+        if (firstArg === 'off' || firstArg === 'disable') {
+            db.logs[logKey] = null;
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: `📁 Logs ${logName} Désactivés`, description: `Le traçage de ${logName.toLowerCase()} est désactivé.` })] });
+        }
+        const targetChan = message.mentions.channels.first() || (firstArg ? message.guild.channels.cache.get(firstArg.replace(/[<#>]/g, '')) : message.channel);
+        db.logs[logKey] = targetChan.id;
+        saveData();
+        return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: `📁 Logs ${logName} Activés`, description: `Les logs ${logName.toLowerCase()} sont redirigés vers ${targetChan}.` })] });
+    };
+
+    if (cmd === 'modlogs') return handleIndividualLogToggle('mod', 'Sanctions (Bans/Kicks/Mutes)');
+    if (cmd === 'msglogs') return handleIndividualLogToggle('msg', 'Messages Supprimés / Édités');
+    if (cmd === 'raidlogs') return handleIndividualLogToggle('raid', 'Alertes Anti-Raid');
+    if (cmd === 'rolelogs') return handleIndividualLogToggle('role', 'Rôles & Permissions');
+    if (cmd === 'voicelogs') return handleIndividualLogToggle('voice', 'Connexions & Déconnexions Vocales');
+    if (cmd === 'boostlogs') return handleIndividualLogToggle('boost', 'Boosts de Serveur');
+    if (cmd === 'captchalogs') return handleIndividualLogToggle('captcha', 'Vérifications Captcha');
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODULE AUTOMATISATION & COMMUNAUTÉ (+autoperm, +automods, +autopublish, +autoreact, +captcha, +counter)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── +autoperm ────────────────────────────────────────────────────────
+    if (cmd === 'autoperm') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Permission Administrateur requise pour AutoPerm.');
+        }
+
+        try {
+            await message.guild.roles.everyone.setPermissions(
+                message.guild.roles.everyone.permissions.remove([
+                    PermissionsBitField.Flags.MentionEveryone,
+                    PermissionsBitField.Flags.Administrator,
+                    PermissionsBitField.Flags.ManageGuild,
+                    PermissionsBitField.Flags.ManageRoles,
+                    PermissionsBitField.Flags.ManageChannels,
+                    PermissionsBitField.Flags.BanMembers,
+                    PermissionsBitField.Flags.KickMembers,
+                    PermissionsBitField.Flags.ModerateMembers,
+                    PermissionsBitField.Flags.ManageWebhooks
+                ]),
+                'AutoPerm: Sécurisation automatique du rôle @everyone'
+            );
+
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.SUCCESS,
+                    title: '🛡️ AutoPerm · Rôles et Permissions Sécurisés',
+                    description: `Le rôle **@everyone** a été verrouillé contre les abus et failles de sécurité.`,
+                    fields: [
+                        { name: 'Permissions révoquées pour @everyone', value: '• Mentionner @everyone / @here\n• Droits Administrateur\n• Gérer le serveur & les webhooks\n• Gérer les salons & rôles\n• Bannir / Expulser / Mute', inline: false }
+                    ]
+                })]
+            });
+        } catch (e) {
+            console.error('[AUTOPERM] Erreur modification perms:', e);
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '❌ Erreur', description: 'Impossible de modifier les permissions du rôle @everyone.' })] });
+        }
+    }
+
+    // ─── +automods ────────────────────────────────────────────────────────
+    if (cmd === 'automods') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild) && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Permission Gérer le serveur requise pour configurer l\'AutoMod.');
+        }
+
+        try {
+            // Création règle Anti-Mention Spam native Discord
+            await message.guild.autoModerationRules.create({
+                name: 'Supreme Anti-Mention Spam',
+                eventType: 1, // MESSAGE_SEND
+                triggerType: 5, // MENTION_SPAM
+                triggerMetadata: { mentionTotalLimit: 5 },
+                actions: [{ type: 1 }] // BLOCK_MESSAGE
+            }).catch(() => {});
+
+            // Création règle Anti-Invites Discord
+            await message.guild.autoModerationRules.create({
+                name: 'Supreme Anti-Invitations',
+                eventType: 1,
+                triggerType: 1, // KEYWORD
+                triggerMetadata: {
+                    keywordFilter: ['*discord.gg/*', '*discord.com/invite/*', '*discordapp.com/invite/*']
+                },
+                actions: [{ type: 1 }]
+            }).catch(() => {});
+
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.SUCCESS,
+                    title: '🤖 Règles AutoMod Discord Actives',
+                    description: 'Règles natives Discord AutoMod générées avec succès (Anti-Mention Spam & Anti-Liens d\'invitations externes).'
+                })]
+            });
+        } catch (e) {
+            console.error('[AUTOMODS] Erreur:', e);
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '❌ Erreur', description: 'Impossible de configurer les règles AutoMod (vérifiez mes permissions "Gérer le serveur").' })] });
+        }
+    }
+
+    // ─── +autopublish [#salon/all/off] ────────────────────────────────────
+    if (cmd === 'autopublish') {
+        if (!isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire requise.');
+        }
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'all') {
+            db.autoPublish = ['all'];
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: '📢 Auto-Publish Activé (Tous les Salons)', description: 'Tous les messages postés dans n\'importe quel salon d\'annonces seront automatiquement publiés.' })] });
+        }
+        if (sub === 'off' || sub === 'disable') {
+            db.autoPublish = [];
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '📢 Auto-Publish Désactivé', description: 'La publication automatique est coupée.' })] });
+        }
+
+        const targetChan = message.mentions.channels.first() || (sub ? message.guild.channels.cache.get(sub.replace(/[<#>]/g, '')) : message.channel);
+        if (db.autoPublish.includes(targetChan.id)) {
+            db.autoPublish = db.autoPublish.filter(id => id !== targetChan.id);
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '📢 Auto-Publish Retiré', description: `Le salon ${targetChan} n'est plus en auto-publication.` })] });
+        } else {
+            db.autoPublish.push(targetChan.id);
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: '📢 Auto-Publish Activé', description: `Les messages du salon ${targetChan} seront automatiquement diffusés.` })] });
+        }
+    }
+
+    // ─── +autoreact <#salon> <emojis...> ──────────────────────────────────
+    if (cmd === 'autoreact') {
+        if (!isManager(message.member)) {
+            return replyPermissionDenied(message, 'Permission Gestionnaire requise.');
+        }
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'list') {
+            const list = Object.entries(db.autoReact).map(([chId, emojis]) => `• <#${chId}> : ${emojis.join(' ')}`).join('\n') || '*Aucun auto-react configuré.*';
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.PRIMARY, title: '✨ Liste des Auto-Réactions', description: list })] });
+        }
+
+        const targetChan = message.mentions.channels.first() || message.channel;
+        const emojis = args.filter(a => !a.startsWith('<#') && a !== targetChan.id);
+
+        if (emojis.length === 0) {
+            if (db.autoReact[targetChan.id]) {
+                delete db.autoReact[targetChan.id];
+                saveData();
+                return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '✨ Auto-React Retiré', description: `Auto-réactions retirées pour ${targetChan}.` })] });
+            }
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}autoreact [#salon] <emoji1> [emoji2...]\`` })] });
+        }
+
+        db.autoReact[targetChan.id] = emojis;
+        saveData();
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '✨ Auto-React Configuré',
+                description: `Chaque nouveau message dans ${targetChan} recevra automatiquement : ${emojis.join(' ')}`
+            })]
+        });
+    }
+
+    // ─── +captcha [setup #salon @role / off] ──────────────────────────────
+    if (cmd === 'captcha') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Permission Administrateur requise pour le captcha.');
+        }
+
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'off' || sub === 'disable') {
+            db.captchaConfig.enabled = false;
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '🤖 Captcha Désactivé', description: 'Le système de vérification captcha est mis en veille.' })] });
+        }
+
+        if (sub === 'setup' || message.mentions.roles.first()) {
+            const role = message.mentions.roles.first() || (args[2] ? message.guild.roles.cache.get(args[2].replace(/[<@&>]/g, '')) : null);
+            const channel = message.mentions.channels.first() || message.channel;
+
+            if (!role) {
+                return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '⚠️ Syntaxe', description: `Usage : \`${PREFIX}captcha setup [#salon] <@rôle_vérifié>\`` })] });
+            }
+
+            db.captchaConfig = {
+                enabled: true,
+                roleId: role.id,
+                channelId: channel.id
+            };
+            saveData();
+
+            const panelEmbed = makeEmbed({
+                color: COLORS.PURPLE,
+                title: '🛡️ Portail de Vérification de Sécurité',
+                description: `Pour accéder à l'intégralité du serveur **${message.guild.name}**, veuillez cliquer sur le bouton ci-dessous pour confirmer que vous n'êtes pas un bot.\n\n*Une fois validé, le rôle ${role} vous sera automatiquement attribué.*`
+            });
+
+            const verifyButton = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('captcha_verify_btn')
+                    .setLabel('🛡️ Vérifier mon compte')
+                    .setStyle(ButtonStyle.Success)
+                    .setEmoji('✅')
+            );
+
+            await channel.send({ embeds: [panelEmbed], components: [verifyButton] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: '🤖 Système Captcha Actif', description: `Le portail de vérification a été déployé dans ${channel} avec le rôle ${role}.` })] });
+        }
+
+        const status = db.captchaConfig.enabled
+            ? `🟢 **Actif**\n• Salon : <#${db.captchaConfig.channelId}>\n• Rôle : <@&${db.captchaConfig.roleId}>`
+            : '🔴 **Désactivé**';
+
+        return message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.PRIMARY,
+                title: '🤖 Statut du Système Captcha',
+                description: `${status}\n\n*Pour configurer : \`${PREFIX}captcha setup [#salon] <@rôle>\`*`
+            })]
+        });
+    }
+
+    // ─── +counter [setup / off / update] ──────────────────────────────────
+    if (cmd === 'counter' || cmd === 'compteur') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && !isOwner(message.author.id, message.guild)) {
+            return replyPermissionDenied(message, 'Permission Administrateur requise pour les compteurs.');
+        }
+
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'off' || sub === 'disable') {
+            db.counterConfig.enabled = false;
+            saveData();
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: '📊 Compteurs Désactivés', description: 'Les compteurs automatiques ont été désactivés.' })] });
+        }
+
+        if (sub === 'update') {
+            await updateServerCounters(message.guild);
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.SUCCESS, title: '🔄 Compteurs Actualisés', description: 'Les salons statistiques ont été mis à jour.' })] });
+        }
+
+        // Configuration / Création automatique
+        try {
+            const cat = await message.guild.channels.create({
+                name: '📊・STATISTIQUES',
+                type: ChannelType.GuildCategory,
+                permissionOverwrites: [
+                    {
+                        id: message.guild.roles.everyone.id,
+                        deny: [PermissionsBitField.Flags.Connect],
+                        allow: [PermissionsBitField.Flags.ViewChannel]
+                    }
+                ]
+            });
+
+            const memChan = await message.guild.channels.create({
+                name: `👥・Membres : ${message.guild.memberCount}`,
+                type: ChannelType.GuildVoice,
+                parent: cat.id
+            });
+
+            const voiceCount = message.guild.members.cache.filter(m => m.voice?.channelId).size;
+            const vChan = await message.guild.channels.create({
+                name: `🔊・En Vocal : ${voiceCount}`,
+                type: ChannelType.GuildVoice,
+                parent: cat.id
+            });
+
+            db.counterConfig = {
+                enabled: true,
+                categoryId: cat.id,
+                membersChannelId: memChan.id,
+                voiceChannelId: vChan.id
+            };
+            saveData();
+
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.SUCCESS,
+                    title: '📊 Salons Compteurs Créés',
+                    description: `Les salons statistiques vocaux ont été déployés et se mettront à jour en temps réel :\n• **Membres :** ${memChan}\n• **En Vocal :** ${vChan}`
+                })]
+            });
+        } catch (e) {
+            console.error('[COUNTER] Erreur création compteurs:', e);
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '❌ Erreur', description: 'Impossible de créer les salons compteurs (vérifiez mes permissions "Gérer les salons").' })] });
+        }
     }
 });
 
