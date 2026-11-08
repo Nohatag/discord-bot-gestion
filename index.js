@@ -831,7 +831,9 @@ const generateHelpData = () => {
                 { name: `\`${PREFIX}ticket delcat <nom>\``, value: 'Supprime un motif existant.', inline: false },
                 { name: `\`${PREFIX}ticket listcat\``, value: 'Liste vos catégories de ticket actuelles et leurs salons hôtes.', inline: false },
                 { name: `\`${PREFIX}ticket setcat <nom_motif> <id_catégorie>\``, value: 'Assigne une catégorie Discord distincte pour chaque motif de ticket.', inline: false },
-                { name: `\`${PREFIX}ticket send [#salon]\``, value: 'Déploie le panel public interactif dans le salon souhaité.', inline: false }
+                { name: `\`${PREFIX}ticket send [#salon]\``, value: 'Déploie le panel public interactif dans le salon souhaité.', inline: false },
+                { name: `\`${PREFIX}rename <nouveau nom>\``, value: 'Renomme le salon du ticket en cours (Staff ou Auteur).', inline: false },
+                { name: `\`${PREFIX}close [raison]\``, value: 'Ferme et supprime le ticket avec compte à rebours de 5s et logs.', inline: false }
             ]
         },
         security: {
@@ -2231,6 +2233,162 @@ client.on('messageCreate', async (message) => {
             embeds: [configPanel.embed],
             components: [configPanel.actionRow]
         });
+    }
+
+    // ─── COMMANDE : +rename <nouveau nom> ─────────────────────────────────
+    if (cmd === 'rename' || (cmd === 'ticket' && (args[0]?.toLowerCase() === 'rename' || args[0]?.toLowerCase() === 'renommer'))) {
+        const ticketData = db.openTickets.get(message.channel.id);
+        const isTicketChannel = ticketData || message.channel.name.toLowerCase().startsWith('ticket-');
+
+        if (!isTicketChannel) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Salon Invalide',
+                    description: 'La commande `+rename` ne peut être utilisée que dans un salon de ticket ouvert.'
+                })]
+            });
+        }
+
+        if (!isStaff(message.member) && (!ticketData || ticketData.authorId !== message.author.id)) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '⛔ Accès refusé',
+                    description: 'Seul l\'auteur du ticket ou un membre de l\'équipe staff peut renommer ce ticket.'
+                })]
+            });
+        }
+
+        const rawArgs = cmd === 'rename' ? args : args.slice(1);
+        const rawNewName = rawArgs.join(' ').trim();
+
+        if (!rawNewName) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Syntaxe de la commande',
+                    description: `Usage : \`${PREFIX}rename <nouveau nom>\`\nExemple : \`${PREFIX}rename support-urgent\` ou \`${PREFIX}rename ${message.author.username}-aide\``
+                })]
+            });
+        }
+
+        let cleanName = rawNewName
+            .toLowerCase()
+            .replace(/\s+/g, '-')
+            .replace(/[^a-z0-9-_]/g, '')
+            .slice(0, 100);
+
+        if (!cleanName) {
+            cleanName = `ticket-${Date.now().toString().slice(-4)}`;
+        }
+
+        const oldName = message.channel.name;
+
+        try {
+            await message.channel.setName(cleanName);
+
+            const successEmbed = makeEmbed({
+                color: COLORS.SUCCESS,
+                title: '✏️ Ticket Renommé',
+                description: `Le ticket a été renommé avec succès par ${message.author}.`,
+                fields: [
+                    { name: 'Ancien nom', value: `\`${oldName}\``, inline: true },
+                    { name: 'Nouveau nom', value: `\`${cleanName}\``, inline: true }
+                ]
+            });
+
+            await message.reply({ embeds: [successEmbed] });
+
+            if (db.ticketConfig.logsChannelId) {
+                const logsChan = message.guild.channels.cache.get(db.ticketConfig.logsChannelId);
+                if (logsChan) {
+                    logsChan.send({
+                        embeds: [makeEmbed({
+                            color: COLORS.CYAN,
+                            title: '✏️ Ticket Renommé',
+                            fields: [
+                                { name: 'Salon', value: `<#${message.channel.id}> (\`${cleanName}\`)`, inline: true },
+                                { name: 'Renommé par', value: `${message.author.tag} (${message.author})`, inline: true },
+                                { name: 'Auteur original', value: ticketData ? `<@${ticketData.authorId}>` : 'Inconnu', inline: true }
+                            ]
+                        })]
+                    }).catch(() => {});
+                }
+            }
+        } catch (err) {
+            console.error('[TICKET] Erreur lors du renommage du salon:', err);
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '⚠️ Limite Discord atteinte',
+                    description: 'Discord limite les renommages de salons (maximum 2 fois par 10 minutes par salon). Veuillez patienter quelques minutes avant de réessayer.'
+                })]
+            });
+        }
+        return;
+    }
+
+    // ─── COMMANDE : +close [raison] ───────────────────────────────────────
+    if (cmd === 'close' || (cmd === 'ticket' && (args[0]?.toLowerCase() === 'close' || args[0]?.toLowerCase() === 'fermer'))) {
+        const ticketData = db.openTickets.get(message.channel.id);
+        const isTicketChannel = ticketData || message.channel.name.toLowerCase().startsWith('ticket-');
+
+        if (!isTicketChannel) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '⚠️ Salon Invalide',
+                    description: 'La commande `+close` ne peut être utilisée que dans un salon de ticket ouvert.'
+                })]
+            });
+        }
+
+        if (!isStaff(message.member) && (!ticketData || ticketData.authorId !== message.author.id)) {
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '⛔ Accès refusé',
+                    description: 'Seul l\'auteur du ticket ou un membre de l\'équipe staff peut fermer ce ticket.'
+                })]
+            });
+        }
+
+        const rawArgs = cmd === 'close' ? args : args.slice(1);
+        const reason = rawArgs.join(' ').trim() || 'Fermé par commande';
+
+        await message.reply({
+            embeds: [makeEmbed({
+                color: COLORS.DANGER,
+                title: '🔒 Fermeture du Ticket',
+                description: `Fermeture demandée par ${message.author}.\n**Raison :** ${reason}\n\nSuppression du salon dans **5 secondes**...`
+            })]
+        });
+
+        if (db.ticketConfig.logsChannelId) {
+            const logsChan = message.guild.channels.cache.get(db.ticketConfig.logsChannelId);
+            if (logsChan) {
+                logsChan.send({
+                    embeds: [makeEmbed({
+                        color: COLORS.DANGER,
+                        title: '🔒 Ticket Fermé & Supprimé',
+                        fields: [
+                            { name: 'Salon fermé', value: `\`${message.channel.name}\``, inline: true },
+                            { name: 'Fermé par', value: `${message.author.tag}`, inline: true },
+                            { name: 'Raison', value: reason, inline: true },
+                            { name: 'Auteur original', value: ticketData ? `<@${ticketData.authorId}>` : 'Inconnu', inline: true }
+                        ]
+                    })]
+                }).catch(() => {});
+            }
+        }
+
+        setTimeout(async () => {
+            db.openTickets.delete(message.channel.id);
+            saveData();
+            await message.channel.delete().catch(() => {});
+        }, 5000);
+        return;
     }
 
     // ─── COMMANDE : TICKET & GESTION DES CATÉGORIES ───────────────────────
