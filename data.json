@@ -1,0 +1,80 @@
+{
+  "ticketCount": 14,
+  "ticketConfig": {
+    "categoryId": "1567990545979146240",
+    "staffRoleId": "1567990320992620575",
+    "logsChannelId": null,
+    "panelChannelId": "1567990960908931272",
+    "categories": [
+      {
+        "id": "cat_1793997517671",
+        "emoji": "⭐",
+        "label": "support",
+        "description": "questions ? viens dans cette categorie !",
+        "categoryId": "1567990642288889986"
+      },
+      {
+        "id": "cat_1793997703973",
+        "emoji": "💫",
+        "label": "recrutement",
+        "description": "tveut etre rc ? fait un ticket ici",
+        "categoryId": "1567990658084376686"
+      },
+      {
+        "id": "cat_1793997737031",
+        "emoji": "♾️",
+        "label": "illegal/legal",
+        "description": "tveut une entreprise fait un ticket ici !",
+        "categoryId": "1567990673754423386"
+      }
+    ]
+  },
+  "welcomeConfig": {
+    "enabled": true,
+    "channelId": null,
+    "message": "👋 Salut {user} bienvenue sur **{server}** on est maintenant {count} **grâce à toi**"
+  },
+  "autoRoleId": "1567990380455002183",
+  "ghostJoinConfig": {
+    "enabled": true,
+    "channels": [
+      "1567990846899494912",
+      "1567990852100292748",
+      "1567990960908931272"
+    ]
+  },
+  "rolePerms": {
+    "addRole": "1567990246887530558",
+    "delRole": "1568546215262552134",
+    "derankAllowed": "1568546342349836340",
+    "derankProtected": "1567990380455002183"
+  },
+  "antiRaid": {
+    "active": true,
+    "antiLink": true,
+    "antiSpam": true,
+    "antiBot": true,
+    "antiMention": true,
+    "maxMentions": 4,
+    "antiChannel": true,
+    "antiRole": true,
+    "antiBan": true
+  },
+  "blacklistedRoles": {},
+  "warnings": {},
+  "notes": {},
+  "openTickets": {
+    "1568572063034249246": {
+      "authorId": "370086165061042179",
+      "category": "support",
+      "claimedBy": null,
+      "createdAt": "2026-11-07T10:25:23.304Z"
+    },
+    "1568705035917852672": {
+      "authorId": "735164880788652143",
+      "category": "support",
+      "claimedBy": null,
+      "createdAt": "2026-11-07T19:13:45.976Z"
+    }
+  }
+}
