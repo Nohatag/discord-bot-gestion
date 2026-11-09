@@ -97,7 +97,12 @@ const loadData = () => {
             maxMentions: 4,
             antiChannel: true,
             antiRole: true,
-            antiBan: true
+            antiBan: true,
+            panic: {
+                enabled: false,
+                limit: 5,
+                window: 10
+            }
         },
         warnings: {},
         notes: {},
@@ -151,7 +156,14 @@ const loadData = () => {
             autoRoleId: parsed.autoRoleId ?? defaults.autoRoleId,
             ghostJoinConfig: { ...defaults.ghostJoinConfig, ...(parsed.ghostJoinConfig || {}) },
             rolePerms: { ...defaults.rolePerms, ...(parsed.rolePerms || {}) },
-            antiRaid: { ...defaults.antiRaid, ...(parsed.antiRaid || {}) },
+            antiRaid: {
+                ...defaults.antiRaid,
+                ...(parsed.antiRaid || {}),
+                panic: {
+                    ...defaults.antiRaid.panic,
+                    ...((parsed.antiRaid && parsed.antiRaid.panic) || {})
+                }
+            },
             warnings: parsed.warnings || {},
             notes: parsed.notes || {},
             blacklistedRoles: parsed.blacklistedRoles || {},
@@ -207,6 +219,10 @@ const db = {
     captchaConfig: initialData.captchaConfig,
     counterConfig: initialData.counterConfig
 };
+
+// Registres volatils pour l'anti-panic (détection de départs massifs en temps réel)
+const recentMemberLeaves = new Map(); // guildId -> array of leave timestamps
+const panicCooldowns = new Map();     // guildId -> timestamp of last panic execution
 
 // Fonction de synchronisation immédiate sur disque
 const saveData = () => {
@@ -858,6 +874,9 @@ const buildDerankConfigEmbed = (guild) => {
 // ─── DASHBOARD INTERACTIF ANTI-RAID (+antiraid / +securite) ────────────────
 const buildAntiRaidConfigEmbed = (guild) => {
     const ar = db.antiRaid;
+    if (!ar.panic) {
+        ar.panic = { enabled: false, limit: 5, window: 10 };
+    }
     const globalStatus = ar.active ? '🟢 **ACTIF (Protection maximale)**' : '🔴 **PAUSE (Système inactif)**';
 
     const embed = new EmbedBuilder()
@@ -876,6 +895,7 @@ const buildAntiRaidConfigEmbed = (guild) => {
             `> 📁 **Anti-Channel :** ${ar.antiChannel ? '🟢 Activé *(Protection salons)*' : '🔴 Désactivé'}`,
             `> 🎭 **Anti-Role :** ${ar.antiRole ? '🟢 Activé *(Protection rôles)*' : '🔴 Désactivé'}`,
             `> 🔨 **Anti-MassBan :** ${ar.antiBan ? '🟢 Activé *(Alerte & blocage bans massifs)*' : '🔴 Désactivé'}`,
+            `> 🚨 **Anti-Panic :** ${ar.panic?.enabled ? `🟢 Activé *(${ar.panic.limit || 5} départs en ${ar.panic.window || 10}s)*` : '🔴 Désactivé'}`,
             ``,
             `*Cliquez sur les boutons ci-dessous pour basculer instantanément chaque module.*`
         ].join('\n'))
@@ -919,7 +939,7 @@ const buildAntiRaidConfigEmbed = (guild) => {
         new ButtonBuilder()
             .setCustomId('antiraid_toggle_ban')
             .setLabel(`Anti-Ban ${ar.antiBan ? 'ON' : 'OFF'}`)
-            .setStyle(ar.antiBan ? ButtonStyle.Success : ButtonStyle.Secondary)
+            .setStyle(ar.antiRole ? ButtonStyle.Success : ButtonStyle.Secondary)
             .setEmoji('🔨'),
         new ButtonBuilder()
             .setCustomId('antiraid_toggle_global')
@@ -928,7 +948,191 @@ const buildAntiRaidConfigEmbed = (guild) => {
             .setEmoji(ar.active ? '⏸️' : '▶️')
     );
 
-    return { embed, components: [row1, row2] };
+    const row3 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('antiraid_toggle_panic')
+            .setLabel(`Anti-Panic ${ar.panic?.enabled ? 'ON' : 'OFF'}`)
+            .setStyle(ar.panic?.enabled ? ButtonStyle.Success : ButtonStyle.Secondary)
+            .setEmoji('🚨'),
+        new ButtonBuilder()
+            .setCustomId('antiraid_open_panic')
+            .setLabel('Configurer Panic (+panic)')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('⚙️')
+    );
+
+    return { embed, components: [row1, row2, row3] };
+};
+
+// ─── DASHBOARD INTERACTIF ANTI-PANIC (+panic) ──────────────────────────────
+const buildPanicConfigEmbed = async (guild) => {
+    const ar = db.antiRaid;
+    if (!ar.panic) {
+        ar.panic = { enabled: false, limit: 5, window: 10 };
+    }
+    const panic = ar.panic;
+
+    // Analyse de la hiérarchie des rôles avec permission Administrateur
+    let botHighest = 0;
+    try {
+        const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+        if (botMember) botHighest = botMember.roles.highest.position;
+    } catch {}
+
+    const allRoles = await guild.roles.fetch().catch(() => guild.roles.cache);
+    const adminRoles = allRoles.filter(r => r.id !== guild.id && r.permissions.has(PermissionsBitField.Flags.Administrator));
+
+    const modifiableRoles = [];
+    const unmodifiableRoles = [];
+
+    for (const [_, role] of adminRoles) {
+        if (role.editable && botHighest > role.position) {
+            modifiableRoles.push(role);
+        } else {
+            unmodifiableRoles.push(role);
+        }
+    }
+
+    const modifiableText = modifiableRoles.length > 0
+        ? modifiableRoles.map(r => `> • <@&${r.id}> (\`${r.name}\`)`).join('\n')
+        : '> *Aucun rôle avec permission Administrateur modifiable trouvé.*';
+
+    const unmodifiableText = unmodifiableRoles.length > 0
+        ? unmodifiableRoles.map(r => `> • <@&${r.id}> (\`${r.name}\`) — *(Au-dessus du bot ou non géré)*`).join('\n')
+        : '> *Aucun rôle au-dessus du bot.*';
+
+    const embed = new EmbedBuilder()
+        .setColor(panic.enabled ? COLORS.SUCCESS : COLORS.DANGER)
+        .setTitle('🚨 Sécurité Anti-Raid · Module Anti-Panic (+panic)')
+        .setDescription([
+            `Le protocole **Anti-Panic** surveille en continu les vagues de départs massifs de membres sur **${guild.name}**.`,
+            `Si le seuil est franchi dans la fenêtre de temps configurée, le bot déclenche immédiatement une **révocation d'urgence de la permission Administrateur** sur tous les rôles modifiables.`,
+            ``,
+            `### ⚙️ Configuration Actuelle :`,
+            `> ⚡ **Statut :** ${panic.enabled ? '🟢 **ACTIVÉ**' : '🔴 **DÉSACTIVÉ**'}`,
+            `> 👥 **Seuil de départs :** \`${panic.limit}\` membres`,
+            `> ⏱️ **Laps de temps :** \`${panic.window}\` secondes`,
+            `> 🛡️ **Déclenchement :** Si **${panic.limit}** personnes ou plus quittent le serveur en moins de **${panic.window}s**, le panic s'active.`,
+            ``,
+            `### 📋 Audit des Rôles Administrateur :`,
+            `> 🟢 **Rôles modifiables par le bot (${modifiableRoles.length}) :**`,
+            modifiableText,
+            ``,
+            `> ⚠️ **Rôles NON modifiables (${unmodifiableRoles.length}) :**`,
+            unmodifiableText,
+            ``,
+            unmodifiableRoles.length > 0
+                ? `💡 *Astuce : Pour que le bot puisse protéger les rôles signalés en ⚠️, positionnez le rôle le plus élevé du bot tout en haut dans les paramètres des rôles Discord.*`
+                : `✅ *Le bot possède l'autorité hiérarchique pour sécuriser 100% des rôles administrateurs.*`
+        ].join('\n'))
+        .setFooter({ text: 'Supreme Management · Anti-Panic Protocol' })
+        .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('panic_btn_toggle')
+            .setLabel(panic.enabled ? 'Désactiver' : 'Activer')
+            .setStyle(panic.enabled ? ButtonStyle.Danger : ButtonStyle.Success)
+            .setEmoji(panic.enabled ? '🔴' : '🟢'),
+        new ButtonBuilder()
+            .setCustomId('panic_btn_config')
+            .setLabel('Régler Seuil & Temps')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('⚙️'),
+        new ButtonBuilder()
+            .setCustomId('panic_btn_trigger')
+            .setLabel('Tester / Forcer Urgence')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('⚠️'),
+        new ButtonBuilder()
+            .setCustomId('panic_btn_refresh')
+            .setLabel('Actualiser')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('🔄')
+    );
+
+    return { embed, components: [row] };
+};
+
+// ─── EXÉCUTEUR DU PROTOCOLE PANIC D'URGENCE ───────────────────────────────
+const executePanicLockdown = async (guild, leaveCount, windowSeconds, triggeredBy = 'Automatique (Anti-Raid Panic)') => {
+    try {
+        const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+        if (!botMember) return;
+
+        const botHighest = botMember.roles.highest.position;
+        const allRoles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const securedRoles = [];
+        const uneditableRoles = [];
+
+        for (const [id, role] of allRoles) {
+            if (role.id === guild.id) continue; // Ignore @everyone
+            if (!role.permissions.has(PermissionsBitField.Flags.Administrator)) continue;
+
+            const canEdit = role.editable && (botHighest > role.position);
+            if (canEdit) {
+                try {
+                    const newPerms = role.permissions.remove(PermissionsBitField.Flags.Administrator);
+                    await role.setPermissions(newPerms, `[ANTI-RAID PANIC] Départs massifs détectés (${leaveCount} départs en ${windowSeconds}s)`);
+                    securedRoles.push(role);
+                    console.warn(`[PANIC] Permission Administrateur révoquée du rôle "${role.name}" (${role.id})`);
+                } catch (err) {
+                    console.error(`[PANIC] Échec retrait permission sur ${role.name}:`, err.message);
+                    uneditableRoles.push({ role, reason: err.message });
+                }
+            } else {
+                const reason = botHighest <= role.position
+                    ? 'Rôle situé au-dessus ou au même niveau que le bot dans la hiérarchie'
+                    : 'Rôle d\'intégration système / non modifiable';
+                uneditableRoles.push({ role, reason });
+                console.warn(`[PANIC] Rôle "${role.name}" non modifiable: ${reason}`);
+            }
+        }
+
+        const alertEmbed = makeEmbed({
+            color: COLORS.DANGER,
+            title: '🚨 PROTOCOLE PANIC ANTI-RAID DÉCLENCHÉ !',
+            description: [
+                `⚠️ **Alerte de sécurité maximale :** Une vague anormale de départs a été interceptée sur **${guild.name}** !`,
+                ``,
+                `> 📊 **Détection :** \`${leaveCount}\` départs en moins de \`${windowSeconds} secondes\`.`,
+                `> 🛡️ **Action immédiate :** Révocation automatique de la permission \`ADMINISTRATOR\` sur les rôles modifiables.`,
+                `> 👤 **Origine :** \`${triggeredBy}\``,
+                ``,
+                `### 🔒 Rôles Sécurisés (Perm Admin Révoquée) :`,
+                securedRoles.length > 0
+                    ? securedRoles.map(r => `> ✅ **${r.name}** (\`${r.id}\`)`).join('\n')
+                    : `> *Aucun rôle administré modifiable n'a été trouvé.*`,
+                ``,
+                `### ⚠️ Rôles Non Modifiables (Intervention Requise) :`,
+                uneditableRoles.length > 0
+                    ? uneditableRoles.map(i => `> ❌ **${i.role.name}** (\`${i.role.id}\`) — *${i.reason}*`).join('\n')
+                    : `> *Tous les rôles avec la permission Administrateur ont pu être protégés.*`,
+                ``,
+                `⚠️ **Mesures recommandées :** Vérifiez immédiatement le journal d'audit du serveur pour identifier l'auteur des expulsions/bans.`
+            ].join('\n')
+        });
+
+        // 1. Envoi dans les logs raid (+raidlogs)
+        await sendLog(guild, 'raid', alertEmbed);
+
+        // 2. Envoi dans le salon système si existant
+        if (guild.systemChannel && guild.systemChannel.isTextBased()) {
+            await guild.systemChannel.send({ embeds: [alertEmbed] }).catch(() => {});
+        }
+
+        // 3. Notification en MP au Propriétaire du serveur
+        try {
+            const owner = await guild.fetchOwner().catch(() => null);
+            if (owner) {
+                await owner.send({ embeds: [alertEmbed] }).catch(() => {});
+            }
+        } catch (e) {}
+
+        return { securedRoles, uneditableRoles };
+    } catch (error) {
+        console.error('[PANIC] Erreur générale lors de l\'exécution du protocole panic:', error);
+    }
 };
 
 // ─── MODULE D'AIDE INTERACTIF (Dropdown Menu Style SupremeBot) ──────────────
@@ -1073,6 +1277,7 @@ const generateHelpData = () => {
             description: 'Verrouillage de salon et blindage du serveur contre le raid, les bots malveillants et le flood.',
             fields: [
                 { name: `\`${PREFIX}antiraid\` ou \`${PREFIX}securite\``, value: 'Ouvre le Dashboard interactif Anti-Raid avec boutons de contrôle en temps réel.', inline: false },
+                { name: `\`${PREFIX}panic [on|off|<départs> <sec>]\``, value: 'Panneau Anti-Panic : révoque la permission admin des rôles modifiables lors d\'une vague de départs massifs.', inline: false },
                 { name: `\`${PREFIX}antispam <on|off>\``, value: 'Bloque et sanctionne les membres envoyant du flood rapide (5+ msg/5s).', inline: false },
                 { name: `\`${PREFIX}antilink <on|off>\``, value: 'Supprime automatiquement les liens d\'invitation Discord non autorisés.', inline: false },
                 { name: `\`${PREFIX}antibot <on|off>\``, value: 'Expulse immédiatement les bots non certifiés ajoutés au serveur.', inline: false },
@@ -1247,9 +1452,41 @@ client.on('guildMemberAdd', async (member) => {
     updateServerCounters(member.guild);
 });
 
-// ─── ÉVÉNEMENT : DÉPART DE MEMBRE (Mise à jour compteurs) ─────────────────
+// ─── ÉVÉNEMENT : DÉPART DE MEMBRE (Compteurs & Anti-Panic Raid) ───────────
 client.on('guildMemberRemove', async (member) => {
     updateServerCounters(member.guild);
+
+    if (!member.guild) return;
+
+    // Détection Anti-Raid Panic (Vague de départs massifs de membres)
+    if (db.antiRaid && db.antiRaid.active && db.antiRaid.panic && db.antiRaid.panic.enabled) {
+        const guild = member.guild;
+        const now = Date.now();
+        const panicConfig = db.antiRaid.panic;
+        const windowMs = (panicConfig.window || 10) * 1000;
+        const limit = panicConfig.limit || 5;
+
+        if (!recentMemberLeaves.has(guild.id)) {
+            recentMemberLeaves.set(guild.id, []);
+        }
+        const leaves = recentMemberLeaves.get(guild.id);
+        leaves.push(now);
+
+        // Nettoyage et comptage des départs dans la fenêtre temporelle
+        const activeLeaves = leaves.filter(t => (now - t) <= windowMs);
+        recentMemberLeaves.set(guild.id, activeLeaves);
+
+        // Seuil d'alerte atteint
+        if (activeLeaves.length >= limit) {
+            const lastTrigger = panicCooldowns.get(guild.id) || 0;
+            // Cooldown de sécurité de 30 secondes pour éviter les exécutions multiples simultanées
+            if (now - lastTrigger > 30000) {
+                panicCooldowns.set(guild.id, now);
+                console.warn(`[ANTI-RAID PANIC] Déclenchement automatique ! ${activeLeaves.length} départs détectés en moins de ${panicConfig.window}s.`);
+                await executePanicLockdown(guild, activeLeaves.length, panicConfig.window);
+            }
+        }
+    }
 });
 
 // ─── ÉVÉNEMENT : INTERCEPTION EN DIRECT BLRANK & LOGS (guildMemberUpdate) ──
@@ -2434,6 +2671,10 @@ client.on('interactionCreate', async (interaction) => {
         else if (action === 'channel') db.antiRaid.antiChannel = !db.antiRaid.antiChannel;
         else if (action === 'role') db.antiRaid.antiRole = !db.antiRaid.antiRole;
         else if (action === 'ban') db.antiRaid.antiBan = !db.antiRaid.antiBan;
+        else if (action === 'panic') {
+            if (!db.antiRaid.panic) db.antiRaid.panic = { enabled: false, limit: 5, window: 10 };
+            db.antiRaid.panic.enabled = !db.antiRaid.panic.enabled;
+        }
         else if (action === 'global') {
             db.antiRaid.active = !db.antiRaid.active;
         }
@@ -2441,6 +2682,113 @@ client.on('interactionCreate', async (interaction) => {
         saveData();
         const updated = buildAntiRaidConfigEmbed(interaction.guild);
         return interaction.update({ embeds: [updated.embed], components: updated.components });
+    }
+
+    // Ouverture du panneau Panic depuis le dashboard Anti-Raid
+    if (interaction.isButton() && interaction.customId === 'antiraid_open_panic') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator) && interaction.user.id !== interaction.guild.ownerId) {
+            return interaction.reply({ content: '⛔ Accès refusé. Permission Administrateur requise.', ephemeral: true });
+        }
+        const panicPanel = await buildPanicConfigEmbed(interaction.guild);
+        return interaction.reply({ embeds: [panicPanel.embed], components: panicPanel.components, ephemeral: true });
+    }
+
+    // Interactions du panneau dédié +panic
+    if (interaction.isButton() && interaction.customId.startsWith('panic_btn_')) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator) && interaction.user.id !== interaction.guild.ownerId) {
+            return interaction.reply({ content: '⛔ Accès refusé. Permission Administrateur requise.', ephemeral: true });
+        }
+
+        if (!db.antiRaid.panic) {
+            db.antiRaid.panic = { enabled: false, limit: 5, window: 10 };
+        }
+
+        const action = interaction.customId.replace('panic_btn_', '');
+
+        if (action === 'toggle') {
+            db.antiRaid.panic.enabled = !db.antiRaid.panic.enabled;
+            saveData();
+            const updated = await buildPanicConfigEmbed(interaction.guild);
+            return interaction.update({ embeds: [updated.embed], components: updated.components });
+        }
+
+        if (action === 'refresh') {
+            const updated = await buildPanicConfigEmbed(interaction.guild);
+            return interaction.update({ embeds: [updated.embed], components: updated.components });
+        }
+
+        if (action === 'config') {
+            const modal = new ModalBuilder()
+                .setCustomId('modal_config_panic')
+                .setTitle('⚙️ Configuration Anti-Panic');
+
+            const limitInput = new TextInputBuilder()
+                .setCustomId('panic_input_limit')
+                .setLabel('Nombre de départs pour déclencher')
+                .setPlaceholder('Exemple: 5')
+                .setValue(String(db.antiRaid.panic.limit || 5))
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const windowInput = new TextInputBuilder()
+                .setCustomId('panic_input_window')
+                .setLabel('Laps de temps (en secondes)')
+                .setPlaceholder('Exemple: 10')
+                .setValue(String(db.antiRaid.panic.window || 10))
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(limitInput),
+                new ActionRowBuilder().addComponents(windowInput)
+            );
+
+            return interaction.showModal(modal);
+        }
+
+        if (action === 'trigger') {
+            await interaction.deferReply({ ephemeral: true });
+            const res = await executePanicLockdown(interaction.guild, 0, 0, `Déclenchement Manuel (+panic bouton par ${interaction.user.tag})`);
+            const updated = await buildPanicConfigEmbed(interaction.guild);
+            await interaction.editReply({
+                content: `🚨 **Protocole Panic d'urgence exécuté !**\n• Rôles sécurisés (Admin retiré) : **${res?.securedRoles?.length || 0}**\n• Rôles non modifiables : **${res?.uneditableRoles?.length || 0}**`
+            });
+            return interaction.message?.edit({ embeds: [updated.embed], components: updated.components }).catch(() => {});
+        }
+    }
+
+    // Soumission du Modal de configuration Panic
+    if (interaction.isModalSubmit() && interaction.customId === 'modal_config_panic') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator) && interaction.user.id !== interaction.guild.ownerId) {
+            return interaction.reply({ content: '⛔ Accès refusé. Permission Administrateur requise.', ephemeral: true });
+        }
+
+        const rawLimit = interaction.fields.getTextInputValue('panic_input_limit').trim();
+        const rawWindow = interaction.fields.getTextInputValue('panic_input_window').trim();
+
+        const limit = parseInt(rawLimit, 10);
+        const windowSec = parseInt(rawWindow, 10);
+
+        if (isNaN(limit) || limit < 1) {
+            return interaction.reply({ content: '❌ Le nombre de départs doit être un nombre entier positif (ex: 5).', ephemeral: true });
+        }
+        if (isNaN(windowSec) || windowSec < 1) {
+            return interaction.reply({ content: '❌ Le laps de temps doit être un nombre de secondes positif (ex: 10).', ephemeral: true });
+        }
+
+        if (!db.antiRaid.panic) db.antiRaid.panic = { enabled: false, limit: 5, window: 10 };
+        db.antiRaid.panic.limit = limit;
+        db.antiRaid.panic.window = windowSec;
+        db.antiRaid.panic.enabled = true;
+        saveData();
+
+        const panicPanel = await buildPanicConfigEmbed(interaction.guild);
+        return interaction.reply({
+            content: `✅ **Anti-Panic configuré et activé avec succès !**\n> • Départs requis : **${limit}** membres\n> • Laps de temps : **${windowSec}** secondes\n\n*Si ${limit} personnes quittent le serveur en moins de ${windowSec}s, la permission Administrateur sera révoquée des rôles modifiables.*`,
+            embeds: [panicPanel.embed],
+            components: panicPanel.components,
+            ephemeral: true
+        });
     }
 });
 
@@ -3492,6 +3840,9 @@ client.on('messageCreate', async (message) => {
             db.antiRaid.active = false;
             saveData();
             return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '🛡️ Sécurité Anti-Raid', description: 'Module anti-raid global mis en **PAUSE**.' })] });
+        } else if (sub === 'panic') {
+            const panicPanel = await buildPanicConfigEmbed(message.guild);
+            return message.reply({ embeds: [panicPanel.embed], components: panicPanel.components });
         }
         // Affichage du Dashboard Interactif Complet
         const panel = buildAntiRaidConfigEmbed(message.guild);
@@ -3589,6 +3940,77 @@ client.on('messageCreate', async (message) => {
         else db.antiRaid.antiBan = !db.antiRaid.antiBan;
         saveData();
         return message.reply({ embeds: [makeEmbed({ color: db.antiRaid.antiBan ? COLORS.SUCCESS : COLORS.DANGER, title: '🔨 Protection Anti-MassBan', description: `La surveillance des expulsions et bans massifs est désormais **${db.antiRaid.antiBan ? 'ACTIVÉE' : 'DÉSACTIVÉE'}**.` })] });
+    }
+
+    if (cmd === 'panic' || cmd === 'antipanic') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) && message.author.id !== message.guild.ownerId) {
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Accès refusé', description: 'Permission `ADMINISTRATOR` requise.' })] });
+        }
+
+        if (!db.antiRaid.panic) {
+            db.antiRaid.panic = { enabled: false, limit: 5, window: 10 };
+        }
+
+        const sub = args[0]?.toLowerCase();
+
+        if (sub === 'on' || sub === 'enable') {
+            db.antiRaid.panic.enabled = true;
+            saveData();
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.SUCCESS,
+                    title: '🚨 Module Anti-Panic Activé',
+                    description: `Le module Anti-Panic est désormais **ACTIVÉ**.\n> • Seuil : **${db.antiRaid.panic.limit}** départs en moins de **${db.antiRaid.panic.window}s**.`
+                })]
+            });
+        }
+
+        if (sub === 'off' || sub === 'disable') {
+            db.antiRaid.panic.enabled = false;
+            saveData();
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.DANGER,
+                    title: '🚨 Module Anti-Panic Désactivé',
+                    description: `Le module Anti-Panic est désormais **DÉSACTIVÉ**.`
+                })]
+            });
+        }
+
+        // Configuration rapide directe : +panic <départs> [secondes]
+        if (sub && !isNaN(parseInt(sub, 10))) {
+            const limit = parseInt(sub, 10);
+            const windowSec = args[1] && !isNaN(parseInt(args[1], 10)) ? parseInt(args[1], 10) : db.antiRaid.panic.window;
+
+            if (limit >= 1 && windowSec >= 1) {
+                db.antiRaid.panic.limit = limit;
+                db.antiRaid.panic.window = windowSec;
+                db.antiRaid.panic.enabled = true;
+                saveData();
+                return message.reply({
+                    embeds: [makeEmbed({
+                        color: COLORS.SUCCESS,
+                        title: '🚨 Configuration Anti-Panic Mise à Jour',
+                        description: `Module configuré et activé avec succès !\n> • Seuil de départs : **${limit}** membres\n> • Laps de temps : **${windowSec}** secondes\n\nSi **${limit}** membres quittent le serveur en moins de **${windowSec}s**, la permission Administrateur sera automatiquement révoquée de tous les rôles modifiables.`
+                    })]
+                });
+            }
+        }
+
+        if (sub === 'trigger' || sub === 'force') {
+            const res = await executePanicLockdown(message.guild, 0, 0, `Déclenchement Manuel (+panic force par ${message.author.tag})`);
+            return message.reply({
+                embeds: [makeEmbed({
+                    color: COLORS.WARNING,
+                    title: '🚨 Protocole Panic Déclenché Manuellement',
+                    description: `Le protocole d'urgence a été exécuté.\n> • Rôles sécurisés : **${res?.securedRoles?.length || 0}**\n> • Rôles non modifiables : **${res?.uneditableRoles?.length || 0}**`
+                })]
+            });
+        }
+
+        // Affichage du panneau interactif complet
+        const panel = await buildPanicConfigEmbed(message.guild);
+        return message.reply({ embeds: [panel.embed], components: panel.components });
     }
 
     // ─── CONFIGURATION DES PERMISSIONS (+set addrole / delrole / derank) ──

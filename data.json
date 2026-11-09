@@ -58,7 +58,12 @@
     "maxMentions": 4,
     "antiChannel": true,
     "antiRole": true,
-    "antiBan": true
+    "antiBan": true,
+    "panic": {
+      "enabled": false,
+      "limit": 5,
+      "window": 10
+    }
   },
   "blacklistedRoles": {},
   "warnings": {},

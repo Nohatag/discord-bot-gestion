@@ -54,6 +54,13 @@ Ouvrez le **Dashboard Anti-Raid interactif** via `+antiraid` ou `+securite` pour
 - `+antichannel <on|off>` : Protection et traçage contre la suppression sauvage de salons.
 - `+antirole <on|off>` : Protection et alertes contre la suppression intempestive de rôles.
 - `+antiban <on|off>` : Détecte et bloque les raids de bannissements massifs par des staffs corrompus.
+- `+panic` : Ouvre le **panneau de configuration Anti-Panic interactif** avec boutons et modal :
+  - **Détection des vagues de départs :** Surveille le nombre de membres qui quittent le serveur dans un laps de temps configurable.
+  - **Révocation d'urgence :** Si le seuil est dépassé, retire d'office la permission `ADMINISTRATOR` de **tous les rôles modifiables** (situés sous le rôle du bot).
+  - **Audit de hiérarchie :** Avertit explicitement si certains rôles administrateurs se trouvent au-dessus du bot pour éviter toute faille.
+  - `+panic <nombre_départs> <secondes>` : Configuration et activation directe (ex: `+panic 5 10`).
+  - `+panic on` / `+panic off` : Active ou désactive le module panic.
+  - `+panic trigger` : Déclenche manuellement le protocole panic d'urgence.
 
 ---
 
