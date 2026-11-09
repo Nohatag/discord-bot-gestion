@@ -31,7 +31,12 @@ const client = new Client({
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildBans,
         GatewayIntentBits.GuildVoiceStates
-    ]
+    ],
+    allowedMentions: {
+        parse: ['users'], // Ne parse jamais les rôles (@&role) ni @everyone/@here
+        roles: [],        // Interdit strictement toute notification/ping de rôle sur tous les embeds et messages
+        repliedUser: false // Aucun ping de notification lors des réponses
+    }
 });
 
 const PREFIX = '+';
@@ -439,7 +444,8 @@ const buildGhostJoinEmbed = (guild) => {
 
 // ─── PANEL DE CONFIGURATION DE L'AUTOROLE (+set autorole) ─────────────────
 const buildAutoRoleEmbed = (guild) => {
-    const roleDisplay = db.autoRoleId ? `<@&${db.autoRoleId}> (\`${db.autoRoleId}\`)` : '`Non configuré (Désactivé)`';
+    const autoRoleObj = db.autoRoleId ? guild.roles.cache.get(db.autoRoleId) : null;
+    const roleDisplay = autoRoleObj ? `**@${autoRoleObj.name}** (\`${db.autoRoleId}\`)` : (db.autoRoleId ? `<@&${db.autoRoleId}>` : '`Non configuré (Désactivé)`');
 
     const embed = new EmbedBuilder()
         .setColor(COLORS.PRIMARY)
@@ -589,7 +595,8 @@ const buildTicketConfigEmbed = (guild) => {
     const cfg = db.ticketConfig;
 
     const categoryText = cfg.categoryId ? `<#${cfg.categoryId}> (\`${cfg.categoryId}\`)` : '`Non configurée (Racine)`';
-    const roleText = cfg.staffRoleId ? `<@&${cfg.staffRoleId}> (\`${cfg.staffRoleId}\`)` : '`Non configuré (Admin uniquement)`';
+    const staffRoleObj = cfg.staffRoleId ? guild.roles.cache.get(cfg.staffRoleId) : null;
+    const roleText = staffRoleObj ? `**@${staffRoleObj.name}** (\`${cfg.staffRoleId}\`)` : (cfg.staffRoleId ? `<@&${cfg.staffRoleId}>` : '`Non configuré (Admin uniquement)`');
     const logsText = cfg.logsChannelId ? `<#${cfg.logsChannelId}> (\`${cfg.logsChannelId}\`)` : '`Désactivé`';
     const panelText = cfg.panelChannelId ? `<#${cfg.panelChannelId}>` : '`Non déployé`';
 
@@ -695,7 +702,8 @@ const resolveMemberAndRole = async (guild, arg1, arg2) => {
 // ─── PANEL DE CONFIGURATION +addrole (+set addrole) ────────────────────────
 const buildAddRoleConfigEmbed = (guild) => {
     const roleId = db.rolePerms.addRole;
-    const roleDisplay = roleId ? `<@&${roleId}> (\`${roleId}\`)` : '`Administrateurs uniquement (par défaut)`';
+    const roleObj = roleId ? guild.roles.cache.get(roleId) : null;
+    const roleDisplay = roleObj ? `**@${roleObj.name}** (\`${roleId}\`)` : (roleId ? `<@&${roleId}>` : '`Administrateurs uniquement (par défaut)`');
 
     const embed = new EmbedBuilder()
         .setColor(COLORS.PRIMARY)
@@ -739,7 +747,8 @@ const buildAddRoleConfigEmbed = (guild) => {
 // ─── PANEL DE CONFIGURATION +delrole (+set delrole) ────────────────────────
 const buildDelRoleConfigEmbed = (guild) => {
     const roleId = db.rolePerms.delRole;
-    const roleDisplay = roleId ? `<@&${roleId}> (\`${roleId}\`)` : '`Administrateurs uniquement (par défaut)`';
+    const roleObj = roleId ? guild.roles.cache.get(roleId) : null;
+    const roleDisplay = roleObj ? `**@${roleObj.name}** (\`${roleId}\`)` : (roleId ? `<@&${roleId}>` : '`Administrateurs uniquement (par défaut)`');
 
     const embed = new EmbedBuilder()
         .setColor(COLORS.PRIMARY)
@@ -785,8 +794,11 @@ const buildDerankConfigEmbed = (guild) => {
     const allowedId = db.rolePerms.derankAllowed;
     const protectedId = db.rolePerms.derankProtected;
 
-    const allowedDisplay = allowedId ? `<@&${allowedId}> (\`${allowedId}\`)` : '`Administrateurs uniquement (par défaut)`';
-    const protectedDisplay = protectedId ? `<@&${protectedId}> (\`${protectedId}\`)` : '`Aucun (retire TOUS les rôles)`';
+    const allowedObj = allowedId ? guild.roles.cache.get(allowedId) : null;
+    const protectedObj = protectedId ? guild.roles.cache.get(protectedId) : null;
+
+    const allowedDisplay = allowedObj ? `**@${allowedObj.name}** (\`${allowedId}\`)` : (allowedId ? `<@&${allowedId}>` : '`Administrateurs uniquement (par défaut)`');
+    const protectedDisplay = protectedObj ? `**@${protectedObj.name}** (\`${protectedId}\`)` : (protectedId ? `<@&${protectedId}>` : '`Aucun (retire TOUS les rôles)`');
 
     const embed = new EmbedBuilder()
         .setColor(COLORS.DANGER)
@@ -2633,15 +2645,16 @@ client.on('messageCreate', async (message) => {
         }
 
         if (!role.editable) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie Insuffisante', description: `Le rôle ${role} est placé plus haut ou égal au mien.` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie Insuffisante', description: `Le rôle **@${role.name}** (\`${role.id}\`) est placé plus haut ou égal au mien.` })] });
         }
 
         const statusMsg = await message.reply({
             embeds: [makeEmbed({
                 color: COLORS.PRIMARY,
                 title: '⚡ Attribution Massive en Cours...',
-                description: `Scan de l'ensemble des membres pour le rôle ${role}...`
-            })]
+                description: `Scan de l'ensemble des membres pour le rôle **@${role.name}** (\`${role.id}\`)...`
+            })],
+            allowedMentions: { roles: [] }
         });
 
         const members = await message.guild.members.fetch();
@@ -2652,8 +2665,9 @@ client.on('messageCreate', async (message) => {
                 embeds: [makeEmbed({
                     color: COLORS.SUCCESS,
                     title: '✅ Rôle Déjà Détenu',
-                    description: `Tous les membres (${members.size}) possèdent déjà le rôle ${role}.`
-                })]
+                    description: `Tous les membres (${members.size}) possèdent déjà le rôle **@${role.name}** (\`${role.id}\`).`
+                })],
+                allowedMentions: { roles: [] }
             });
         }
 
@@ -2678,12 +2692,13 @@ client.on('messageCreate', async (message) => {
                 description: [
                     `Opération exécutée par ${message.author}.`,
                     ``,
-                    `> 🎭 **Rôle attribué :** ${role} (\`${role.id}\`)`,
+                    `> 🎭 **Rôle attribué :** **@${role.name}** (\`${role.id}\`)`,
                     `> ✅ **Membres actualisés :** **${assignedCount}** / ${total}`,
                     `> ⏭️ **Membres ayant déjà le rôle :** **${members.size - total}**`,
                     `> ⚠️ **Échecs :** ${failCount}`
                 ].join('\n')
-            })]
+            })],
+            allowedMentions: { roles: [] }
         });
     }
 
@@ -3626,15 +3641,15 @@ client.on('messageCreate', async (message) => {
 
         const botHighest = message.guild.members.me.roles.highest.position;
         if (role.position >= botHighest) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Le bot ne peut pas attribuer le rôle ${role} car ce dernier est égal ou supérieur à son propre rôle le plus haut.` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Le bot ne peut pas attribuer le rôle **@${role.name}** car ce dernier est égal ou supérieur à son propre rôle le plus haut.` })] });
         }
 
         if (message.author.id !== message.guild.ownerId && role.position >= message.member.roles.highest.position) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Vous ne pouvez pas attribuer un rôle supérieur ou égal au vôtre (${role}).` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Vous ne pouvez pas attribuer un rôle supérieur ou égal au vôtre (**@${role.name}**).` })] });
         }
 
         if (target.roles.cache.has(role.id)) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: 'ℹ️ Rôle déjà attribué', description: `${target} possède déjà le rôle ${role}.` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: 'ℹ️ Rôle déjà attribué', description: `${target} possède déjà le rôle **@${role.name}** (\`${role.id}\`).` })] });
         }
 
         const userBl = db.blacklistedRoles[target.id] || [];
@@ -3643,7 +3658,7 @@ client.on('messageCreate', async (message) => {
                 embeds: [makeEmbed({
                     color: COLORS.DANGER,
                     title: '⛔ Rôle Blacklisté',
-                    description: `Le rôle ${role} est **strictement blacklisté** pour ${target} via la commande \`${PREFIX}blrank\`.\nUtilisez \`${PREFIX}unblrank\` pour lever la restriction.`
+                    description: `Le rôle **@${role.name}** est **strictement blacklisté** pour ${target} via la commande \`${PREFIX}blrank\`.\nUtilisez \`${PREFIX}unblrank\` pour lever la restriction.`
                 })]
             });
         }
@@ -3653,10 +3668,10 @@ client.on('messageCreate', async (message) => {
             embeds: [makeEmbed({
                 color: COLORS.SUCCESS,
                 title: '🎭 Rôle Attribué',
-                description: `Le rôle ${role} a été accordé avec succès à ${target}.`,
+                description: `Le rôle **@${role.name}** a été accordé avec succès à ${target}.`,
                 fields: [
                     { name: '👤 Membre', value: `${target} (\`${target.id}\`)`, inline: true },
-                    { name: '🎭 Rôle Ajouté', value: `${role} (\`${role.id}\`)`, inline: true },
+                    { name: '🎭 Rôle Ajouté', value: `**@${role.name}** (\`${role.id}\`)`, inline: true },
                     { name: '🛡️ Modérateur', value: `${message.author}`, inline: true }
                 ]
             })]
@@ -3688,15 +3703,15 @@ client.on('messageCreate', async (message) => {
 
         const botHighest = message.guild.members.me.roles.highest.position;
         if (role.position >= botHighest) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Le bot ne peut pas retirer le rôle ${role} car ce dernier est égal ou supérieur à son propre rôle le plus haut.` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Le bot ne peut pas retirer le rôle **@${role.name}** car ce dernier est égal ou supérieur à son propre rôle le plus haut.` })] });
         }
 
         if (message.author.id !== message.guild.ownerId && role.position >= message.member.roles.highest.position) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Vous ne pouvez pas retirer un rôle supérieur ou égal au vôtre (${role}).` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.DANGER, title: '⛔ Hiérarchie insuffisante', description: `Vous ne pouvez pas retirer un rôle supérieur ou égal au vôtre (**@${role.name}**).` })] });
         }
 
         if (!target.roles.cache.has(role.id)) {
-            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: 'ℹ️ Rôle absent', description: `${target} ne possède pas le rôle ${role}.` })] });
+            return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: 'ℹ️ Rôle absent', description: `${target} ne possède pas le rôle **@${role.name}** (\`${role.id}\`).` })] });
         }
 
         await target.roles.remove(role, `Retiré par ${message.author.tag} (+delrole)`);
@@ -3704,10 +3719,10 @@ client.on('messageCreate', async (message) => {
             embeds: [makeEmbed({
                 color: COLORS.SUCCESS,
                 title: '🎭 Rôle Retiré',
-                description: `Le rôle ${role} a été retiré de ${target}.`,
+                description: `Le rôle **@${role.name}** a été retiré de ${target}.`,
                 fields: [
                     { name: '👤 Membre', value: `${target} (\`${target.id}\`)`, inline: true },
-                    { name: '🎭 Rôle Retiré', value: `${role} (\`${role.id}\`)`, inline: true },
+                    { name: '🎭 Rôle Retiré', value: `**@${role.name}** (\`${role.id}\`)`, inline: true },
                     { name: '🛡️ Modérateur', value: `${message.author}`, inline: true }
                 ]
             })]
@@ -3752,14 +3767,15 @@ client.on('messageCreate', async (message) => {
         });
 
         if (rolesToRemove.size === 0) {
-            const extra = protectedRoleId ? ` (ou ne possède que le rôle protégé <@&${protectedRoleId}>)` : '';
+            const extra = protectedRoleId ? ` (ou ne possède que le rôle protégé \`${protectedRoleId}\`)` : '';
             return message.reply({ embeds: [makeEmbed({ color: COLORS.WARNING, title: 'ℹ️ Aucun rôle à révoquer', description: `${target} ne possède aucun rôle retirable${extra}.` })] });
         }
 
         await target.roles.remove(rolesToRemove, `Derank exécuté par ${message.author.tag}`);
 
+        const protectedRoleObj = protectedRoleId ? message.guild.roles.cache.get(protectedRoleId) : null;
         const protectedDisplay = protectedRoleId
-            ? `🟢 **Rôle protégé conservé :** <@&${protectedRoleId}>`
+            ? `🟢 **Rôle protégé conservé :** **@${protectedRoleObj ? protectedRoleObj.name : protectedRoleId}** (\`${protectedRoleId}\`)`
             : `⚠️ **Aucun rôle protégé configuré :** Tous les rôles ont été retirés.`;
 
         return message.reply({
